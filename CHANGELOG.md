@@ -80,7 +80,7 @@ Boundaries, not gaps.
   service clears it.
 - **One replica, `strategy: Recreate`.** It does not scale out.
 
-The README's [Honest limits](README.md#honest-limits) has the measurements behind all four.
+[Honest limits](docs/LIMITS.md) has the measurements behind all four.
 
 ### Requirements
 

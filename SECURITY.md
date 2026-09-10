@@ -26,8 +26,8 @@ a fix goes onto `main` and into the next tag.
 ## What is already known, and is not a vulnerability
 
 These are documented properties of the design, not oversights. Reporting them tells us
-nothing we have not written down, and the README's
-[Honest limits](README.md#honest-limits) is the authority on all of them.
+nothing we have not written down, and
+[Honest limits](docs/LIMITS.md) is the authority on all of them.
 
 - **The HTTP API does not authenticate its callers.** ClusterIP, no Ingress, no API key.
   Anything that can reach the service can raise a preview and build a workload. It is

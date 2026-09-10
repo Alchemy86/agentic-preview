@@ -40,16 +40,81 @@ destination of a preview is not a value you hand the manager — it is *a proces
 session and answering dial requests*. Put that process in the cluster and `net.Dial`
 reaches any ClusterIP.
 
-That is why this is a long-lived service and not a one-shot API call, and it is why
-`target_host` must be a **literal IP**: the agent parses it with `iputil.ParseAddr`
-(`cmd/traffic/cmd/agent/fwd/tcp.go`) and fails the intercept on a name. agentic-preview
-resolves the preview Service itself before creating the intercept.
+That is the whole trick. The laptop, the TUN device and the root privileges were never
+about routing — they were only ever about getting a dial to the right side of the network.
+In-cluster, there is nothing to tunnel *to*; you are already there.
+
+Two consequences fall straight out of it:
+
+- **It must be long-lived.** A one-shot API call cannot be the far end of a tunnel. The
+  service holds one manager session for its whole life, and every preview reconciles onto
+  that session.
+- **`target_host` must be a literal IP.** The agent parses it with `iputil.ParseAddr`
+  (`cmd/traffic/cmd/agent/fwd/tcp.go`) and fails the intercept on a name, so
+  agentic-preview resolves the preview Service by DNS itself before creating the intercept.
 
 **One tunnel per agent pod per session, not per preview.** Because each dial request
 carries its own destination, a single dial loop already forwards each request to whichever
 preview matched. Two work ids previewing one workload therefore share one node-agent Job
 and one tunnel — measured. Opening a second `WatchDial` for the same agent and session
 would only fight the first for the same slot.
+
+### The shape of one intercepted request
+
+```mermaid
+flowchart LR
+    CI["CI pipeline"]
+    IN["incoming request"]
+
+    subgraph K["inside the cluster"]
+        direction LR
+        AP["<b>agentic-preview</b><br/>one session, one process"]
+        TM["traffic-manager<br/>owns intercept state"]
+        NA["node-agent<br/>on the target's node"]
+        LIVE["checkout-api<br/>the live pod, untouched"]
+        PREV["checkout-api-preview-1234<br/>a copy of live, your image"]
+    end
+
+    CI -- "POST /previews" --> AP
+    AP -- "1. copies the live Deployment,<br/>swaps the image, adds a Service" --> PREV
+    AP -- "2. CreateIntercept:<br/>header filter + target IP" --> TM
+    TM -- "3. provisions a Job" --> NA
+    AP -. "4. WatchDial:<br/>holds the tunnel open" .-> NA
+
+    IN --> NA
+    NA -- "no header:<br/>straight through" --> LIVE
+    NA == "5. header matched:<br/>dial request down the tunnel" ==> AP
+    AP == "6. plain net.Dial<br/>to a ClusterIP" ==> PREV
+
+    classDef me fill:#0d1117,stroke:#32d46d,stroke-width:2.5px,color:#f0f3f6
+    classDef tp fill:#161b22,stroke:#30363d,stroke-width:1px,color:#8b949e
+    classDef app fill:#161b22,stroke:#30363d,stroke-width:1px,color:#f0f3f6
+    class AP me
+    class TM,NA tp
+    class LIVE,PREV,IN,CI app
+    style K fill:#0d1117,stroke:#30363d,stroke-width:1px,color:#8b949e
+    linkStyle 7,8 stroke:#32d46d,stroke-width:2.5px
+```
+
+Step 6 is the one worth re-reading. The dial to the preview happens *in agentic-preview's
+own process*, from inside the cluster — which is why no tunnelling, no routing table and
+no privilege is involved anywhere.
+
+### Step 1: the preview is built from the live workload, not from a template
+
+Read the running Deployment, deep-copy its pod template, put the caller's image on the
+chosen container, set the replica count, relabel it so nothing else in the namespace can
+claim it, and create it. Everything a pod needs to actually run — its environment, its
+`envFrom` ConfigMap and Secret references, its volumes, its `imagePullSecrets`, its probes,
+its resources, its service account — comes across because it was copied, not because
+anybody enumerated it.
+
+That is not a tidy implementation choice, it is the lesson. Three earlier attempts built
+the preview from a template instead and failed three different ways: an image reference
+that did not resolve, no credentials to pull a private image, and a pod that started and
+died on the spot because it had none of the live configuration. Anything invented rather
+than copied is a fourth way to fail. The header comment on `buildPreviewDeployment` in
+`workload.go` is the record.
 
 ---
 

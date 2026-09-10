@@ -3,8 +3,9 @@
 `agentic-preview` is a single Go package at the repo root that raises header-routed
 Telepresence previews. **Read [`docs/DESIGN.md`](docs/DESIGN.md) before changing anything**
 — it holds the design fact the whole service is built on (the traffic-agent never dials
-`target_host`; the dial happens in this process) and the measured behaviour behind every
-claim in the README. This file does not repeat it.
+`target_host`; the dial happens in this process) and the mechanism of an intercepted
+request. The measured numbers and failure modes are in
+[`docs/LIMITS.md`](docs/LIMITS.md). This file does not repeat either.
 
 ## Sharp edges
 
@@ -36,8 +37,14 @@ claim in the README. This file does not repeat it.
 - **The tool knows nothing about how an image came to exist.** No tag conventions, no
   registry assumptions, no parsing of the work id, no notion of a pull request. Callers hand
   it an image reference and it runs that reference verbatim; teardown is explicit. If a
-  change wants to infer something from a tag or a merge, that is the line. The README's
-  "What it deliberately does not do" is the authority.
+  change wants to infer something from a tag or a merge, that is the line.
+  [`docs/NON-GOALS.md`](docs/NON-GOALS.md) is the authority.
+- **README.md is the front page, not the manual.** It keeps the pitch, the feature map,
+  install, the API table, and the short forms of the non-goals and the limits — everything
+  else lives as a page under `docs/`, indexed by [`docs/README.md`](docs/README.md). Detail
+  belongs on the subpage with a link from the front page, never appended to README.md; when
+  you add a page, add its row to that index. Every relative link and heading anchor across
+  README and `docs/` is expected to resolve.
 - **Previews are built by COPYING the live Deployment** (`buildPreviewDeployment`), never
   from a template. Three earlier attempts failed three ways by inventing what could be
   copied. The header comment on that function is the record; read it before changing what
