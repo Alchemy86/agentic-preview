@@ -1,0 +1,9 @@
+<!-- agentic-preview icon — three lanes, the middle one diverted
+     Hand-authored for agentic-preview. No font embedded, subset or traced;
+     letterforms are original stroked paths. Regenerate with python3 brand/make.py -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img">
+<rect x="1" y="1" width="126" height="126" rx="28" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<rect x="24" y="32" width="80" height="16" rx="8" fill="#32d46d" fill-opacity="0.42"/>
+<rect x="24" y="56" width="80" height="16" rx="8" fill="#32d46d"/>
+<rect x="24" y="80" width="80" height="16" rx="8" fill="#32d46d" fill-opacity="0.42"/>
+</svg>

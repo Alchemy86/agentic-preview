@@ -1,0 +1,88 @@
+# agentic-preview authenticates to the traffic-manager with its ServiceAccount's
+# projected token, which the manager resolves with a Kubernetes TokenReview.
+#
+# These two Roles are what the manager reviews under
+# AUTHENTICATION_MODE=enforcing. Under the default permissive mode an
+# unauthenticated caller is let through without a Principal and authorization is
+# skipped entirely - so on a permissive manager these grants are never
+# consulted. Declare them anyway: the identity should be honest whether or not
+# anything is checking, and a later move to enforcing then costs nothing.
+---
+# ConnectReview: authorizes opening a client session, in the MANAGER's namespace.
+#
+# PLACEHOLDER (1): `telepresence` -> your traffic-manager's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentic-preview-connect
+  namespace: telepresence
+  labels:
+    app: agentic-preview
+rules:
+  - apiGroups: ["telepresence.io"]
+    resources: ["connections"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentic-preview-connect
+  namespace: telepresence
+  labels:
+    app: agentic-preview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentic-preview-connect
+subjects:
+  - kind: ServiceAccount
+    name: agentic-preview
+    namespace: agentic-preview
+---
+# AttachmentReview: authorizes intercepting a workload, in the WORKLOAD's
+# namespace. ONE Role AND RoleBinding PER NAMESPACE agentic-preview may
+# intercept in - copy this pair for each one, and keep the set identical to
+# ALLOWED_NAMESPACES in deployment.yaml.
+#
+# PLACEHOLDER (2): `shop` -> a namespace holding workloads you want to preview.
+#
+# This bounds INTERCEPTION, and only interception. The other half of a preview
+# is the forward target, which is a plain net.Dial from the pod to a ClusterIP
+# that no Kubernetes permission is consulted for - so no Role can bound it, and
+# ALLOWED_NAMESPACES on the Deployment is the only thing that does. That is why
+# the list is stated in both places and why they must stay in step: this Role is
+# what stands between the list and interception, and that env var is what stands
+# between a caller and forwarding anywhere in the cluster.
+#
+# Left unnamed (no resourceNames) on purpose: the manager also performs an
+# unnamed namespace-wide attachments review (auth.NamespaceReview), which a
+# grant scoped with resourceNames never matches. Adding
+# `resourceNames: [checkout-api, ...]` would tighten this to a fixed workload
+# list at the cost of failing that review.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentic-preview-attach
+  namespace: shop
+  labels:
+    app: agentic-preview
+rules:
+  - apiGroups: ["telepresence.io"]
+    resources: ["attachments"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentic-preview-attach
+  namespace: shop
+  labels:
+    app: agentic-preview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentic-preview-attach
+subjects:
+  - kind: ServiceAccount
+    name: agentic-preview
+    namespace: agentic-preview

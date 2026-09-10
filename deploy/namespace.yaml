@@ -1,0 +1,9 @@
+# PLACEHOLDER (4): the namespace agentic-preview itself runs in. It does not have
+# to be the traffic-manager's namespace and it does not have to be a namespace it
+# intercepts in - it needs neither, only network reach to both.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentic-preview
+  labels:
+    app: agentic-preview

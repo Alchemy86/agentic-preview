@@ -1,0 +1,8 @@
+agentic-preview
+Copyright 2026 the agentic-preview authors
+
+This product includes software developed by the Telepresence project
+(https://github.com/telepresenceio/telepresence), licensed under the
+Apache License, Version 2.0. agentic-preview links its Go client packages
+(rpc/v2 for the manager and agent gRPC stubs, pkg/tunnel for the dial
+loop) and does not modify them.

@@ -1,0 +1,16 @@
+# The Dockerfile only needs go.mod, go.sum and *.go. Everything else is context
+# the daemon would ship for nothing.
+/agentic-preview
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+AGENTS.md
+CLAUDE.md
+LICENSE
+NOTICE
+brand/
+deploy/
+docs/
+examples/

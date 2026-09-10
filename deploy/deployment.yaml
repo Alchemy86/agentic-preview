@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentic-preview
+  namespace: agentic-preview
+  labels:
+    app: agentic-preview
+spec:
+  # EXACTLY ONE REPLICA, and Recreate rather than RollingUpdate.
+  #
+  # agentic-preview holds one traffic-manager client session and the tunnels that
+  # serve it. Two replicas would each arrive as their own session and each try
+  # to raise the same intercepts; the second would collide on identical header
+  # filters rather than share the work. A rolling update would briefly do the
+  # same, so the old pod is stopped before the new one starts. The cost is a
+  # few seconds in which previews are down - see the "honest limits" section of
+  # the README for what "down" means for a request carrying a preview header.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentic-preview
+  template:
+    metadata:
+      labels:
+        app: agentic-preview
+    spec:
+      serviceAccountName: agentic-preview
+      # If your registry is private, add its pull secret here:
+      #   imagePullSecrets:
+      #     - name: your-registry-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentic-preview
+          # PLACEHOLDER (3): your own registry and tag. The tag is overridden by
+          # the `images:` block in kustomization.yaml.
+          image: registry.example.com/agentic-preview:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # PLACEHOLDER (1): the traffic-manager's gRPC address. Required -
+            # there is no default, because the namespace telepresence was
+            # installed into varies and a wrong guess fails as a dial timeout.
+            #   kubectl get deploy -A | grep traffic-manager
+            - name: MANAGER_ADDR
+              value: traffic-manager.telepresence.svc.cluster.local:8081
+            - name: LISTEN_ADDR
+              value: ":8080"
+            # The single header every preview is routed on. Its VALUE is the
+            # work id, which is what lets several PRs of one change be reached
+            # together by one header. Service-level, not per-request, on
+            # purpose: two services of one work id behind different header
+            # names would defeat the point of a work id.
+            - name: HEADER_NAME
+              value: x-preview
+            # PLACEHOLDER (2), and the boundary in BOTH directions: the
+            # namespaces a preview may be intercepted in, and the namespaces it
+            # may be forwarded to. The attachment Roles in rbac.yaml bound
+            # interception only - forwarding is a plain net.Dial that no
+            # Kubernetes permission is consulted for - so this list is the only
+            # thing bounding the forward target. Required: there is no default,
+            # because an empty list read as "everything" is the wrong failure.
+            # Comma-separated. Keep it in step with the attach Roles.
+            - name: ALLOWED_NAMESPACES
+              value: shop
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            # Ready only once a manager session exists, so a caller is never
+            # handed a pod that cannot raise anything.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/agentic-preview
+      volumes:
+        # Records the current session id so a restarted container can depart its
+        # predecessor's session and release what it held. An emptyDir survives a
+        # container restart but not a pod replacement; a replacement falls back
+        # to the conflict-driven sweep, which is the one that actually matters.
+        - name: state
+          emptyDir: {}
+      # Long enough for Shutdown to remove every intercept and depart the
+      # session before the container is killed. Removing them is what makes a
+      # stop safe: an intercept left in manager state with nobody holding its
+      # tunnel makes its own header hang.
+      terminationGracePeriodSeconds: 60

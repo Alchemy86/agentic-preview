@@ -1,2 +1,32 @@
-tools/**/bin/
-*.tmp
+# The compiled service. `go build` in the repo root drops it here, named after
+# the module, and it is ~30 MB of binary nobody wants in a diff.
+/agentic-preview
+agentic-preview.exe
+
+# Go build and test output
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/dist/
+/bin/
+go.work
+go.work.sum
+
+# Go tooling caches, if anyone points them at the tree
+/.gocache/
+/.gomodcache/
+
+# The mark's PNG is committed on purpose (GitHub cannot render an SVG in an
+# issue body), but Python leaves its own litter behind the generator.
+brand/__pycache__/
+*.pyc
+
+# Editor and OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

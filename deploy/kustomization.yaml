@@ -1,0 +1,43 @@
+# agentic-preview, ready to apply once the four placeholders below are replaced.
+#
+#   kubectl apply -k deploy/
+#
+# ---------------------------------------------------------------------------
+# EVERY PLACEHOLDER IN THIS DIRECTORY, and nothing else needs changing:
+#
+#   1. `telepresence`            -> the namespace your traffic-manager runs in.
+#                                   Find it with:
+#                                     kubectl get deploy -A | grep traffic-manager
+#                                   It appears in rbac.yaml (the ConnectReview
+#                                   Role and both RoleBinding subjects) and in
+#                                   MANAGER_ADDR in deployment.yaml.
+#
+#   2. `shop`                    -> each namespace agentic-preview may intercept
+#                                   in and forward to. It appears in rbac.yaml
+#                                   (one attach Role + RoleBinding per
+#                                   namespace) and in ALLOWED_NAMESPACES in
+#                                   deployment.yaml. THE TWO MUST STAY IN STEP -
+#                                   see the note in rbac.yaml for why.
+#
+#   3. registry.example.com/agentic-preview
+#                                -> where you pushed the image built from this
+#                                   repo's Dockerfile. Set below under `images`.
+#
+#   4. `agentic-preview` namespace -> where the service itself runs. Change it in
+#                                   namespace.yaml and in the `namespace:` field
+#                                   of every other file if you want it elsewhere.
+# ---------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+
+# PLACEHOLDER (3). Point this at your own registry and tag.
+images:
+  - name: registry.example.com/agentic-preview
+    newTag: "latest"
