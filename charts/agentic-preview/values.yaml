@@ -1,0 +1,119 @@
+# agentic-preview - values.
+#
+# One value is required and has no default: allowedNamespaces. Everything else
+# below is a default that works. See charts/example-values.yaml in the source
+# repository for a filled-in file.
+
+# REQUIRED. The namespaces agentic-preview may intercept in, build previews in,
+# and forward to. There is no default and the chart refuses to render without
+# it, because this list is the safety boundary in both directions and an empty
+# list read as "every namespace" is the wrong failure.
+#
+# Each entry generates its own attach Role and build Role, with a RoleBinding
+# each, in that namespace - never a ClusterRole - and the same set is passed to
+# the service as ALLOWED_NAMESPACES, so the three ends of a preview cannot
+# drift apart.
+#
+#   allowedNamespaces:
+#     - shop
+#     - warehouse
+allowedNamespaces: []
+
+trafficManager:
+  # The namespace the Telepresence traffic-manager runs in. This is where the
+  # ConnectReview Role and its RoleBinding are created, and - unless `address`
+  # below is set - it is also what the manager's gRPC address is derived from.
+  #
+  #   kubectl get deploy -A | grep traffic-manager
+  #
+  # `telepresence` is Telepresence's own default install namespace, not an
+  # assumption about your cluster. If yours is elsewhere, change it here.
+  namespace: telepresence
+
+  # Optional override for the manager's gRPC address, for an installation that
+  # does not answer on the usual in-cluster name. Leave empty to derive
+  #   traffic-manager.<trafficManager.namespace>.svc.cluster.local:8081
+  # Setting this does NOT move the ConnectReview Role - that follows
+  # `namespace` above, so set both if the manager is somewhere unusual.
+  address: ""
+
+image:
+  repository: ghcr.io/alchemy86/agentic-preview
+  # Empty means the chart's appVersion, which the release workflow stamps from
+  # the same git tag that pushed the image. Leaving it empty is what guarantees
+  # the chart and the image are the same release.
+  #
+  tag: ""
+  # Pin the digest rather than a tag for anything you care about: a tag is a
+  # pointer the registry owner can move, a digest is the bytes. When set, the
+  # image is referenced by digest and `tag` is ignored.
+  #   digest: "sha256:0123..."
+  digest: ""
+  pullPolicy: IfNotPresent
+  # Only needed if you host the image somewhere private. The published package
+  # is public and needs no login.
+  #   pullSecrets:
+  #     - name: your-registry-pull-secret
+  pullSecrets: []
+
+preview:
+  # The single header every preview is routed on. Its VALUE is the work id,
+  # which is what lets several services of one change be reached together.
+  # Service-level, not per-request, on purpose.
+  headerName: x-preview
+
+  # How long a preview lives without being touched, as a safety net against
+  # forgotten previews accumulating. Anything that touches a work id puts every
+  # preview in that id back to a full lifetime.
+  #
+  # It is NOT a teardown policy - teardown is explicit, by DELETE. Set it to
+  # `off` (or `never`, or `0`) when something else is responsible for cleaning
+  # previews up, because a timer that removes a preview while somebody is still
+  # testing against it is worse than a forgotten pod. Leaving it alone gives
+  # you the timer, which is the safe answer when nobody is minding the cluster.
+  lifetime: 24h
+
+  # How long a create waits for the preview's pods to come up before giving up
+  # and reporting why. The two loudest failures - an image reference that does
+  # not resolve, and no credentials to pull it - are invisible at create time
+  # and obvious ten seconds later. `0` skips the wait.
+  readyTimeout: 120s
+
+service:
+  # ClusterIP only, and there is no ingress in this chart on purpose: anything
+  # that can reach this service can raise an intercept on any workload in
+  # allowedNamespaces and point it at any Service in those same namespaces.
+  type: ClusterIP
+  port: 80
+
+serviceAccount:
+  # The identity presented to the traffic-manager. Its projected token is the
+  # only credential the service holds.
+  create: true
+  # Defaults to the release's full name.
+  name: ""
+  annotations: {}
+
+# Passed through unchanged.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Long enough for shutdown to remove every intercept and depart the session
+# before the container is killed. Removing them is what makes a stop safe: an
+# intercept left in manager state with nobody holding its tunnel makes its own
+# header hang.
+terminationGracePeriodSeconds: 60
+
+nameOverride: ""
+fullnameOverride: ""

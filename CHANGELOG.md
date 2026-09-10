@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A Helm chart**, in [`charts/agentic-preview/`](charts/agentic-preview/). It
+  parameterises the manifests in `deploy/` and changes nothing about what they install.
+  `allowedNamespaces` is required and has no default — the chart refuses to render without
+  it, with a message explaining why, rather than leaving the container to crash-loop. One
+  attach Role and one build Role, with a RoleBinding each, are generated per namespace in
+  that list, and the same list becomes `ALLOWED_NAMESPACES`; all three come off the one
+  value so they cannot drift. Still never a ClusterRole, and there is no `replicaCount`:
+  one replica is a correctness requirement, so the chart offers no way to get it wrong.
+- **A chart repository**, published to the `gh-pages` branch and served by GitHub Pages at
+  `https://alchemy86.github.io/agentic-preview`, ready for
+  [Artifact Hub](https://artifacthub.io) to index. `charts/artifacthub-repo.yml` is
+  published beside `index.yaml`, where Artifact Hub reads it from.
+- The `chart` job in `release.yml` packages and publishes it on every `v*` tag, after the
+  image job and stamped from the same tag, so the chart cannot advertise an image that was
+  not pushed.
+- A `chart` job in CI: `helm lint --strict`, `helm template`, and an assertion that
+  rendering without `allowedNamespaces` still fails.
+- `brand/agentic-preview-icon.png`, derived from the icon SVG — the chart's `icon`, which
+  is what Artifact Hub renders on the package page.
+
 ## v0.1.0
 
 Header-routed Telepresence preview environments in Kubernetes, raised by an HTTP call from

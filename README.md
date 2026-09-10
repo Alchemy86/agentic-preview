@@ -6,6 +6,7 @@
 <p align="center">
   <a href="https://github.com/Alchemy86/agentic-preview/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Alchemy86/agentic-preview/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
   <a href="https://github.com/Alchemy86/agentic-preview/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Alchemy86/agentic-preview?sort=semver&amp;label=release" /></a>
+  <a href="https://artifacthub.io/packages/search?repo=agentic-preview"><img alt="Artifact Hub" src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/agentic-preview" /></a>
 </p>
 
 ---
@@ -210,6 +211,71 @@ in v2.30.0; earlier managers will raise an intercept but lose it on the first ro
 agentic-preview does not install Telepresence — see
 [the Telepresence install docs](https://www.telepresence.io/docs/install/manager).
 
+There are two ways in, and they install the same objects. **Helm** is the shorter one and
+the one that keeps the namespace list in step for you; the **raw manifests** in `deploy/`
+are still there and still work, for anyone who would rather not have Helm in the path.
+
+### With Helm
+
+```bash
+helm repo add agentic-preview https://alchemy86.github.io/agentic-preview
+helm repo update
+
+helm install agentic-preview agentic-preview/agentic-preview \
+  --namespace agentic-preview --create-namespace \
+  --set 'allowedNamespaces={shop,warehouse}'
+```
+
+`shop` and `warehouse` are **fictional example namespaces**, not a default worth keeping.
+Replace them with the namespaces holding the workloads you actually want to preview.
+
+**`allowedNamespaces` has no default and the chart refuses to render without it**, with a
+message explaining why rather than a CrashLoopBackOff you have to read logs to explain. It
+is the boundary in both directions, and the chart generates all three of the things that
+have to agree from that one list — one **attach** Role and one **build** Role, with a
+RoleBinding each, per namespace, plus `ALLOWED_NAMESPACES` on the container. **Never a
+ClusterRole**, and the chart offers no way to ask for one.
+
+If your traffic-manager is not in the `telepresence` namespace, say where it is — the
+ConnectReview Role and the manager's gRPC address are both derived from this one value:
+
+```bash
+  --set trafficManager.namespace=YOUR-MANAGER-NAMESPACE
+```
+
+Find it with `kubectl get deploy -A | grep traffic-manager`.
+
+A realistic values file is [`charts/example-values.yaml`](charts/example-values.yaml), and
+the full table of values, with the reasoning behind each,
+is in [the chart's own README](charts/agentic-preview/README.md). Two things are
+deliberately *not* values:
+
+- **`replicaCount`.** Exactly one replica is a correctness requirement, not a preference:
+  two would each hold their own manager session and collide on identical header filters.
+  It is hard-coded, with a `Recreate` strategy, so the chart cannot be asked to get it
+  wrong.
+- **An Ingress.** Anything that can reach the service can raise an intercept on any
+  workload in `allowedNamespaces`. It is a ClusterIP for in-cluster callers, on purpose.
+
+`image.tag` defaults to the chart's `appVersion`, and the release workflow stamps chart
+version, `appVersion` and the image tag from the same `v*` tag — so the chart and the image
+are the same release by construction rather than by anyone remembering. Pin the bytes with
+`--set image.digest=sha256:…` when you care; see below.
+
+Check what you are about to install before you install it:
+
+```bash
+helm template agentic-preview agentic-preview/agentic-preview \
+  --set 'allowedNamespaces={shop}' | less
+```
+
+`helm uninstall` removes the service and its Roles. It does **not** remove previews that
+are still up — those are objects in your own namespaces. Drop them first, or find the
+strays afterwards with
+`kubectl get deploy,svc -A -l app.kubernetes.io/managed-by=agentic-preview`.
+
+### With the raw manifests
+
 **1. Get the image.** Every `v*` tag publishes one to GitHub's registry, for
 `linux/amd64` and `linux/arm64`:
 
@@ -235,7 +301,8 @@ docker buildx imagetools inspect ghcr.io/alchemy86/agentic-preview:0.1.0 \
 
 The digest for each published version is printed in that release's workflow summary,
 under **[Actions → Release](https://github.com/Alchemy86/agentic-preview/actions/workflows/release.yml)**.
-Use the tag to find out what is current; put the digest in the YAML.
+Use the tag to find out what is current; put the digest in the YAML. With Helm, that is
+`image.digest`.
 
 Building it yourself is still a plain `docker build -t <your-registry>/agentic-preview .`
 away, and nothing in `deploy/` assumes where the image came from.
@@ -258,27 +325,32 @@ Three things have to name the same set of namespaces for the life of the deploy:
 **attach** Roles in `deploy/rbac.yaml`, the **build** Roles beside them, and
 `ALLOWED_NAMESPACES` in `deploy/deployment.yaml`. They bound three different ends of a
 preview — intercepting, building, and forwarding — and the third is bounded by that env var
-and nothing else. The reason is in [Honest limits](#honest-limits) and it matters.
-
-**What the permissions allow, in one paragraph.** In the listed namespaces and nowhere
-else: `get`, `list`, `create`, `update` and `delete` on Deployments and Services, and
-`list` on Pods. Never a ClusterRole. Nothing on ConfigMaps or Secrets — the preview
-*references* the live ones, it never reads their contents. Every verb is accounted for
-line by line in [`deploy/rbac.yaml`](deploy/rbac.yaml), and `update` and `delete` are both
-guarded in code by the tool's own `app.kubernetes.io/managed-by` label, so an object it
-did not create is never written to and never removed.
+and nothing else. The reason is in [Honest limits](#honest-limits) and it matters. (This
+is the bookkeeping the chart does for you, off one list.)
 
 **3. Apply it.**
 
 ```bash
 kubectl apply -k deploy/
-kubectl -n agentic-preview rollout status deploy/agentic-preview
 ```
+
+### What the permissions allow, in one paragraph
+
+The same on both paths. In the listed namespaces and nowhere else: `get`, `list`,
+`create`, `update` and `delete` on Deployments and Services, and `list` on Pods. Never a
+ClusterRole. Nothing on ConfigMaps or Secrets — the preview *references* the live ones, it
+never reads their contents. Every verb is accounted for line by line in
+[`deploy/rbac.yaml`](deploy/rbac.yaml), and `update` and `delete` are both guarded in code
+by the tool's own `app.kubernetes.io/managed-by` label, so an object it did not create is
+never written to and never removed.
+
+### Either way, check it came up
 
 It is ready only once a manager session exists, so a green `/readyz` means it can actually
 raise something:
 
 ```bash
+kubectl -n agentic-preview rollout status deploy/agentic-preview
 kubectl -n agentic-preview port-forward svc/agentic-preview 8080:80
 curl -sS localhost:8080/readyz
 ```
@@ -594,10 +666,11 @@ would require it.
 | `agents.go` | One tunnel per node-agent pod, rebuilt as the agent pod set changes |
 | `api.go` | The HTTP API |
 | `deploy/` | Deployment, Service, ServiceAccount, RBAC, kustomization — four placeholders |
+| `charts/` | The Helm chart, a realistic values file, and the Artifact Hub repository metadata |
 | `examples/` | Raise (built or your own), list, drop one, drop all — runnable `curl` |
 | `docs/DESIGN.md` | Design notes, RBAC detail, and the measured behaviour behind the claims above |
 | `brand/` | The mark, the social preview card, and the generator that draws them |
-| `.github/workflows/` | CI on every push and pull request; the image publish on every `v*` tag |
+| `.github/workflows/` | CI on every push and pull request; the image *and the chart* published on every `v*` tag |
 | `CONTRIBUTING.md` | How to build it, and the three boundaries a change has to respect |
 | `SECURITY.md` | How to report a vulnerability privately, and what is already known |
 
@@ -644,6 +717,33 @@ docker buildx build --platform linux/amd64,linux/arm64 .
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest.
 
+### The chart
+
+The chart in [`charts/agentic-preview/`](charts/agentic-preview/) parameterises the
+manifests in `deploy/` and adds nothing to them. Check it the way CI does:
+
+```bash
+helm lint charts/agentic-preview --strict -f charts/example-values.yaml
+helm template agentic-preview charts/agentic-preview -f charts/example-values.yaml
+```
+
+CI runs both on every push, plus one more: that `helm template` with **no**
+`allowedNamespaces` still fails. That is the one guarantee the chart makes, so it is
+asserted rather than assumed.
+
+Publishing is the `chart` job in
+[`release.yml`](.github/workflows/release.yml), and it runs *after* the image job on the
+same `v*` tag. It stamps the chart version, the `appVersion` and the
+`artifacthub.io/images` annotation from that tag, packages, and pushes the `.tgz` and a
+regenerated `index.yaml` to the `gh-pages` branch — which GitHub Pages serves as the chart
+repository, and which [Artifact Hub](https://artifacthub.io) polls for changes. Nothing is
+published by hand, so the chart cannot advertise an image the registry does not have.
+
+[`charts/artifacthub-repo.yml`](charts/artifacthub-repo.yml) is copied to that branch
+beside `index.yaml`, because Artifact Hub reads it over HTTP rather than from the default
+branch. Both of its fields are optional and both are left unset; the file explains what
+each one buys and what has to happen before it can be filled in.
+
 ### The mark
 
 `brand/make.py` is the source of truth. It sets the wordmark in
@@ -659,13 +759,17 @@ python3 brand/make.py
 same mark composed on the 1280×640 panel GitHub renders a repository's social preview card
 in, which is what a link to this repo unfurls to in Slack or Teams.
 
-The two PNGs are **derived artifacts**, committed only because neither GitHub's issue
-bodies nor its social preview setting accept an SVG. Regenerate them whenever the SVGs
-change:
+The three PNGs are **derived artifacts**, committed only because the places they are used
+do not accept an SVG: GitHub's issue bodies, its social preview setting, and the `icon`
+field of the Helm chart, which is what Artifact Hub renders on the package page.
+Regenerate them whenever the SVGs change:
 
 ```bash
 magick -background none brand/agentic-preview-logo.svg \
   -resize 1400x -depth 8 -strip brand/agentic-preview-logo.png
+
+magick -background none brand/agentic-preview-icon.svg \
+  -resize 512x512 -depth 8 -strip brand/agentic-preview-icon.png
 
 magick brand/agentic-preview-social.svg -background '#0d1117' -flatten \
   -alpha remove -alpha off -resize 1280x640 -depth 8 -strip \

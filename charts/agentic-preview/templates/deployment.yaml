@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentic-preview.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentic-preview.labels" . | nindent 4 }}
+spec:
+  # EXACTLY ONE REPLICA, deliberately not a value, and Recreate rather than
+  # RollingUpdate.
+  #
+  # agentic-preview holds one traffic-manager client session and the tunnels
+  # that serve it. Two replicas would each arrive as their own session and each
+  # try to raise the same intercepts; the second would collide on identical
+  # header filters rather than share the work. That makes one replica a
+  # correctness requirement, not a preference, so the chart does not offer to
+  # get it wrong. A rolling update would briefly do the same, so the old pod is
+  # stopped before the new one starts - the cost is a few seconds in which
+  # previews are down.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "agentic-preview.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentic-preview.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "agentic-preview.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentic-preview
+          image: {{ include "agentic-preview.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # The traffic-manager's gRPC address. Plain h2c; the manager
+            # terminates no TLS on this port.
+            - name: MANAGER_ADDR
+              value: {{ include "agentic-preview.managerAddr" . | quote }}
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: HEADER_NAME
+              value: {{ .Values.preview.headerName | quote }}
+            # The boundary in BOTH directions - see the note on
+            # allowedNamespaces in values.yaml. The attach and build Roles
+            # bound interception and creation; nothing but this env var bounds
+            # the forward target, which is why the chart generates all three
+            # from the one list.
+            - name: ALLOWED_NAMESPACES
+              value: {{ include "agentic-preview.allowedNamespaces" . | fromYamlArray | join "," | quote }}
+            - name: PREVIEW_LIFETIME
+              value: {{ include "agentic-preview.previewLifetime" . | quote }}
+            - name: PREVIEW_READY_TIMEOUT
+              value: {{ .Values.preview.readyTimeout | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            # Ready only once a manager session exists, so a caller is never
+            # handed a pod that cannot raise anything.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/agentic-preview
+      volumes:
+        # Records the current session id so a restarted container can depart
+        # its predecessor's session and release what it held. An emptyDir
+        # survives a container restart but not a pod replacement; a replacement
+        # falls back to the conflict-driven sweep, which is the one that
+        # actually matters.
+        - name: state
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Long enough for shutdown to remove every intercept and depart the
+      # session before the container is killed. Removing them is what makes a
+      # stop safe: an intercept left in manager state with nobody holding its
+      # tunnel makes its own header hang.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}

@@ -1,0 +1,32 @@
+# A realistic values file for agentic-preview.
+#
+#   helm install agentic-preview agentic-preview/agentic-preview \
+#     --namespace agentic-preview --create-namespace \
+#     -f charts/example-values.yaml
+#
+# `shop` and `warehouse` here are a FICTIONAL example, used consistently across
+# this repository. They are not a default worth keeping - replace them with the
+# namespaces holding the workloads you actually want to preview.
+
+allowedNamespaces:
+  - shop
+  - warehouse
+
+trafficManager:
+  # kubectl get deploy -A | grep traffic-manager
+  namespace: telepresence
+
+image:
+  repository: ghcr.io/alchemy86/agentic-preview
+  # The digest for each published version is printed in that release's workflow
+  # summary. Pinning it is what makes this manifest reproducible.
+  #   docker buildx imagetools inspect ghcr.io/alchemy86/agentic-preview:0.1.0 \
+  #     --format '{{.Manifest.Digest}}'
+  digest: ""
+  tag: ""
+
+preview:
+  headerName: x-preview
+  # Quote it. Left bare, YAML would read `off` as a boolean.
+  lifetime: "24h"
+  readyTimeout: "120s"

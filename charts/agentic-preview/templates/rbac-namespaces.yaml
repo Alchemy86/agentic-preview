@@ -1,0 +1,140 @@
+{{/*
+One attach Role and one build Role, with a RoleBinding each, PER NAMESPACE in
+allowedNamespaces. NEVER a ClusterRole: cluster-wide create and delete on
+Deployments is the whole cluster, and nothing here needs to see outside the
+namespaces it previews in. Flattening these into one cluster-scoped grant would
+throw away the boundary the tool exists to keep, so the chart generates the
+pairs and offers no way to collapse them.
+
+A preview has three ends and they are bounded by three different things:
+
+  intercepting  the attach Role below, reviewed by the traffic-manager
+  building      the build Role below, enforced by Kubernetes itself
+  forwarding    NOTHING but ALLOWED_NAMESPACES. It is a plain net.Dial from
+                the pod to a ClusterIP and no Kubernetes permission is
+                consulted for it, so no Role can bound it.
+
+All three come off this one list, which is what keeps them in step.
+*/}}
+{{- $root := . }}
+{{- range $namespace := (include "agentic-preview.allowedNamespaces" . | fromYamlArray) }}
+---
+{{/*
+AttachmentReview: authorizes intercepting a workload, in the WORKLOAD's
+namespace.
+
+Left unnamed (no resourceNames) on purpose: the manager also performs an
+unnamed namespace-wide attachments review (auth.NamespaceReview), which a grant
+scoped with resourceNames never matches. Naming workloads would tighten this to
+a fixed list at the cost of failing that review.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentic-preview.fullname" $root }}-attach
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "agentic-preview.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: ["telepresence.io"]
+    resources: ["attachments"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentic-preview.fullname" $root }}-attach
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "agentic-preview.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentic-preview.fullname" $root }}-attach
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentic-preview.serviceAccountName" $root }}
+    namespace: {{ $root.Release.Namespace }}
+---
+{{/*
+The build Role: creating the preview Deployment and Service. Unlike the two
+reviewed by the manager, this one is used directly against the Kubernetes API
+and IS ENFORCED WHATEVER THE MANAGER IS DOING - it is the safety boundary for
+the half of the service that creates workloads.
+
+What each verb is for, and there is nothing here that is not used:
+
+  deployments  get     read the LIVE Deployment, which the preview is a copy
+                       of - the preview carries the live workload's
+                       environment, its ConfigMap and Secret references, its
+                       pull credentials, its probes and its service account
+                       because they were COPIED from it. Also reads back the
+                       preview's own status while waiting for its pods.
+               create  make the preview Deployment.
+               update  roll a preview forward when the same work id is raised
+                       again with a different image, without the gap a delete
+                       and re-create would leave. Guarded in code: an object
+                       that does not carry the tool's managed-by label is
+                       never written to.
+               list    find the tool's own objects, by its own label, so a
+                       DELETE can remove them - including after a restart.
+               delete  remove them.
+
+  services     get     read the LIVE Service, to copy its ports so the preview
+                       answers on the same ones.
+               list    twice: to find the tool's own Services for a DELETE,
+                       and - before creating anything - to check that the
+                       preview's pod labels, copied from live, are not still
+                       selected by some OTHER Service in the namespace. A pod
+                       that is would put unreviewed code into live traffic.
+               create  make the preview Service.
+               update  keep it in step when a preview is re-raised. Same label
+                       guard as Deployments.
+               delete  remove it.
+
+  pods         list    read why a preview's pods are not running, so a POST
+                       that fails says "ErrImagePull: manifest unknown" rather
+                       than "not ready". Read-only, and it is the difference
+                       between a diagnosable failure and a mystery.
+
+NOT granted, deliberately: nothing on ConfigMaps or Secrets (the preview
+REFERENCES the live ones, it does not read or copy their contents), nothing on
+Ingress or any ingress controller's CRDs (traffic arrives through the header,
+not a new front door), no `patch` (update covers it), no `deletecollection`
+(every delete names one object that was first found under this tool's own
+label), and nothing at all outside these namespaces.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentic-preview.fullname" $root }}-build
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "agentic-preview.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentic-preview.fullname" $root }}-build
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "agentic-preview.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentic-preview.fullname" $root }}-build
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentic-preview.serviceAccountName" $root }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}

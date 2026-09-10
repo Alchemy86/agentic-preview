@@ -15,7 +15,21 @@ claim in the README. This file does not repeat it.
   must name the same set.** The Roles bound interception and creation; nothing but that env
   var bounds the forward target. `preview_test.go` and `workload_test.go` are the executable
   form of that boundary — if you touch `PreviewRequest.validate` or `createWorkload`, those
-  tests are the thing to satisfy.
+  tests are the thing to satisfy. The chart generates all three from one `allowedNamespaces`
+  list, which is the only place they cannot drift.
+- **`charts/agentic-preview/` is a parameterisation of `deploy/`, not a second design.**
+  Anything you change in `deploy/deployment.yaml`, `service.yaml`, `serviceaccount.yaml` or
+  `rbac.yaml` has a twin under `charts/agentic-preview/templates/` and both must move
+  together — nothing enforces it. Do not add a value the manifests do not already prove,
+  and never add `replicaCount` or an Ingress; the comments on those two say why.
+  Beware: **`helm lint` reports a template `fail` as INFO and still exits 0**, so
+  `helm template` is the check that means anything. CI's `chart` job runs both plus the
+  assertion that rendering without `allowedNamespaces` still fails.
+- **The chart repository is the `gh-pages` branch**, published only by the `chart` job in
+  `release.yml` on a `v*` tag, after the image job and stamped from the same tag. Never
+  publish it by hand. `charts/artifacthub-repo.yml` has to land beside `index.yaml` there
+  because Artifact Hub reads it over HTTP, not from `main`; that file's own header explains
+  what is deliberately left unset in it and why.
 - **`kube.go`'s `kubeAPI` interface is the inventory the RBAC is written from.** It is the
   whole Kubernetes surface this service uses. Adding a method to it means adding a verb to
   `deploy/rbac.yaml`, with the reason spelled out there — do both or neither.

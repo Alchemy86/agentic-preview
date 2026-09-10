@@ -105,3 +105,141 @@ jobs:
             echo '${{ steps.meta.outputs.tags }}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    name: package and publish the Helm chart
+    # After the image, not beside it. The chart's appVersion names an image tag,
+    # so publishing the chart before the image exists would advertise something
+    # nobody can pull. This dependency is the whole anti-drift mechanism: one
+    # tag produces both, and the chart is only ever published for an image that
+    # was actually pushed.
+    needs: [check, image]
+    runs-on: ubuntu-latest
+    permissions:
+      # To push the packaged chart and the regenerated index to `gh-pages`,
+      # which is the chart repository Artifact Hub indexes. Nothing else here
+      # writes to the repository.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          # Pinned rather than "latest", for the same reason CI pins Go to what
+          # go.mod declares: a Helm release must not be able to turn a tag red
+          # without a commit that says so. This is the version the chart was
+          # developed and validated against.
+          version: v3.21.4
+
+      - name: Stamp the version off the tag
+        id: chart
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # `helm package` sets version and appVersion below, but it cannot
+          # reach the artifacthub.io/images annotation -- and that annotation is
+          # the image reference Artifact Hub runs its vulnerability scanner
+          # against, so a stale one points the scanner at the wrong release.
+          # Rewritten here, with a count first so a reformatted Chart.yaml fails
+          # the job instead of silently not matching.
+          f=charts/agentic-preview/Chart.yaml
+          n="$(grep -c 'image: ghcr.io/alchemy86/agentic-preview:' "$f")"
+          if [ "$n" != "1" ]; then
+            echo "expected exactly one artifacthub.io/images line in $f, found $n" >&2
+            exit 1
+          fi
+          sed -i "s|image: ghcr.io/alchemy86/agentic-preview:.*|image: ghcr.io/alchemy86/agentic-preview:$version|" "$f"
+
+      - name: Lint
+        # With a realistic values file, because linting the defaults renders
+        # almost nothing: allowedNamespaces has no default and the chart
+        # deliberately refuses without it.
+        run: helm lint charts/agentic-preview --strict -f charts/example-values.yaml
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          helm package charts/agentic-preview \
+            --version "${{ steps.chart.outputs.version }}" \
+            --app-version "${{ steps.chart.outputs.version }}" \
+            --destination "$RUNNER_TEMP/dist"
+
+      - name: Publish to the chart repository branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          pages="$RUNNER_TEMP/pages"
+
+          # `gh-pages` holds nothing but the chart repository, so it starts as
+          # an orphan branch the first time this runs.
+          if git clone --depth 1 --branch gh-pages "$remote" "$pages" 2>/dev/null; then
+            echo "Existing chart repository checked out."
+          else
+            echo "No gh-pages branch yet -- creating one."
+            git clone --depth 1 "$remote" "$pages"
+            git -C "$pages" checkout --orphan gh-pages
+            # --ignore-unmatch: an orphan checkout of an empty default
+            # branch has nothing to remove, and that must not fail the job.
+            git -C "$pages" rm -rf --quiet --ignore-unmatch .
+          fi
+
+          cp "$RUNNER_TEMP/dist"/*.tgz "$pages/"
+
+          # Artifact Hub reads this from the chart repository's HTTP server,
+          # beside index.yaml -- not from the default branch.
+          cp charts/artifacthub-repo.yml "$pages/artifacthub-repo.yml"
+
+          # Pages runs Jekyll otherwise, which has opinions about files it was
+          # not asked about.
+          touch "$pages/.nojekyll"
+
+          # A human who pastes the repository URL into a browser gets this
+          # rather than a 404. Artifact Hub and `helm repo add` both read
+          # index.yaml and never look at it.
+          cp charts/pages-index.html "$pages/index.html"
+
+          # --merge keeps every previously published version in the index; the
+          # URLs it writes are where Pages serves the .tgz files from.
+          cd "$pages"
+          if [ -f index.yaml ]; then
+            helm repo index . --url "https://alchemy86.github.io/agentic-preview" --merge index.yaml
+          else
+            helm repo index . --url "https://alchemy86.github.io/agentic-preview"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # Re-running a release for an unchanged tag should not turn the job
+          # red on `nothing to commit`.
+          if git diff --cached --quiet; then
+            echo "Nothing to publish; the chart repository is already current."
+          else
+            git commit -m "Publish agentic-preview chart ${VERSION}"
+            git push "$remote" gh-pages
+          fi
+
+      - name: Record what was published
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          {
+            echo '## Chart published'
+            echo
+            echo '```'
+            echo "helm repo add agentic-preview https://alchemy86.github.io/agentic-preview"
+            echo "helm install agentic-preview agentic-preview/agentic-preview --version ${VERSION} \\"
+            echo "  --namespace agentic-preview --create-namespace \\"
+            echo "  --set 'allowedNamespaces={your-namespace}'"
+            echo '```'
+            echo
+            echo "Chart ${VERSION}, appVersion ${VERSION}, image ghcr.io/alchemy86/agentic-preview:${VERSION}."
+            echo
+            echo 'If GitHub Pages has never been enabled for this repository, the URL above'
+            echo 'will 404 until it is: Settings -> Pages -> Deploy from a branch -> gh-pages / (root).'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,49 @@
+{{- $ns := include "agentic-preview.allowedNamespaces" . | fromYamlArray -}}
+agentic-preview {{ .Chart.AppVersion }} is installed as {{ include "agentic-preview.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+  image            {{ include "agentic-preview.image" . }}
+  manager          {{ include "agentic-preview.managerAddr" . }}
+  header           {{ .Values.preview.headerName }}
+  lifetime         {{ include "agentic-preview.previewLifetime" . }}{{ if eq (include "agentic-preview.previewLifetime" .) "off" }}   (expiry disabled - something else must clean previews up){{ end }}
+  namespaces       {{ join ", " $ns }}
+
+In {{ if gt (len $ns) 1 }}those {{ len $ns }} namespaces{{ else }}that namespace{{ end }} and nowhere else, it may intercept a workload, build a
+preview beside it, and forward to a Service. One attach Role and one build Role
+were created {{ if gt (len $ns) 1 }}in each{{ else }}there{{ end }}. There is no ClusterRole.
+
+1. It is ready only once a manager session exists, so a green /readyz means it
+   can actually raise something:
+
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "agentic-preview.fullname" . }}
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentic-preview.fullname" . }} 8080:{{ .Values.service.port }}
+     curl -sS localhost:8080/readyz
+
+   If it never goes ready, the manager address is the first thing to check:
+
+     kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "agentic-preview.fullname" . }}
+     kubectl get deploy -A | grep traffic-manager
+
+2. Raise a preview, called from inside the cluster. The work id is any string
+   you like - it is the header value, and nothing is ever read out of it:
+
+     curl -sS -XPOST http://{{ include "agentic-preview.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/previews \
+       -H 'content-type: application/json' \
+       -d '{"workId":"my-change","workload":"YOUR-WORKLOAD","namespace":"{{ first $ns }}","image":"YOUR-IMAGE:TAG","port":"http"}'
+
+   Then send that header to the live ingress. Everything without it reaches the
+   live pod, unchanged and unaware:
+
+     curl -H '{{ .Values.preview.headerName }}: my-change' https://your-ingress/...
+
+   Teardown is explicit - DELETE /previews/my-change{{ if ne (include "agentic-preview.previewLifetime" .) "off" }}, or wait {{ include "agentic-preview.previewLifetime" . }} for
+   the expiry safety net{{ end }}. Runnable versions of all of this
+   are in examples/ in the repository.
+
+The API, the worked example, and what this tool deliberately does not do:
+https://github.com/Alchemy86/agentic-preview
+{{- if not .Values.image.digest }}
+
+Note: this release pins the image by tag. A tag is a pointer the registry owner
+can move. For anything you care about, set image.digest instead:
+  docker buildx imagetools inspect {{ include "agentic-preview.image" . }} --format '{{ "{{" }}.Manifest.Digest{{ "}}" }}'
+{{- end }}

@@ -1,0 +1,66 @@
+# The chart's `version` and `appVersion` are both stamped from the git tag by
+# .github/workflows/release.yml, so the two cannot drift: `helm package` is
+# handed --version and --app-version off the same `v*` tag that builds and
+# pushes the image, and the chart job runs after the image job.
+#
+# The values committed here track the last published IMAGE, so that a
+# `helm install ./charts/agentic-preview` straight from a source checkout still
+# names something that exists. The chart itself is first published by the next
+# `v*` tag.
+#
+# `artifacthub.io/changes` below is the one piece of this file that is NOT
+# automated: update it by hand when cutting a release, alongside CHANGELOG.md.
+apiVersion: v2
+name: agentic-preview
+description: Header-routed preview environments in Kubernetes, raised by your pipeline rather than your laptop.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+# The floor implied by the API versions the templates use - apps/v1,
+# rbac.authorization.k8s.io/v1 and seccompProfile in a pod securityContext.
+# It is not a tested support matrix; it is the point below which the manifests
+# stop being valid.
+kubeVersion: ">=1.21.0-0"
+
+home: https://github.com/Alchemy86/agentic-preview
+sources:
+  - https://github.com/Alchemy86/agentic-preview
+icon: https://raw.githubusercontent.com/Alchemy86/agentic-preview/main/brand/agentic-preview-icon.png
+
+keywords:
+  - preview-environments
+  - ephemeral-environments
+  - telepresence
+  - kubernetes
+  - developer-tools
+
+maintainers:
+  - name: Alchemy86
+    url: https://github.com/Alchemy86
+
+# Read by Artifact Hub. Everything below is display metadata for the package
+# page - it changes nothing about what the chart installs.
+# https://artifacthub.io/docs/topics/annotations/helm/
+annotations:
+  artifacthub.io/category: integration-delivery
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/links: |
+    - name: source
+      url: https://github.com/Alchemy86/agentic-preview
+    - name: support
+      url: https://github.com/Alchemy86/agentic-preview/issues
+    - name: design notes
+      url: https://github.com/Alchemy86/agentic-preview/blob/main/docs/DESIGN.md
+  artifacthub.io/images: |
+    - name: agentic-preview
+      image: ghcr.io/alchemy86/agentic-preview:0.1.0
+      platforms:
+        - linux/amd64
+        - linux/arm64
+  artifacthub.io/changes: |
+    - kind: added
+      description: First published chart, parameterising the manifests in deploy/
+    - kind: added
+      description: One attach Role and one build Role per entry in allowedNamespaces, never a ClusterRole

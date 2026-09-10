@@ -1,0 +1,33 @@
+# Artifact Hub repository metadata.
+#
+# The release workflow copies this file to the root of the `gh-pages` branch,
+# next to index.yaml, because Artifact Hub reads it from the chart repository's
+# HTTP server rather than from this branch:
+#
+#   https://alchemy86.github.io/agentic-preview/artifacthub-repo.yml
+#
+# BOTH FIELDS BELOW ARE OPTIONAL and both are left unset on purpose. The chart
+# repository is indexed by Artifact Hub without either of them; they buy two
+# specific things, and each needs a value that only the maintainer can supply,
+# after a one-time action on artifacthub.io that no API here can perform.
+#
+#   repositoryID  Enables the "verified publisher" badge. Artifact Hub assigns
+#                 the ID when the repository is first added on artifacthub.io
+#                 (Control Panel -> Repositories -> Add). Copy it here, commit,
+#                 and cut a release so the file is republished - the flag is
+#                 applied the next time the repository is processed, and
+#                 Artifact Hub only reprocesses when index.yaml has changed.
+#
+#   owners        Enables an ownership claim. The email MUST match the one used
+#                 to sign in to Artifact Hub, which is why it is not guessed
+#                 here. Unlike the verified-publisher flag, an ownership claim
+#                 is processed immediately.
+#
+# Fill in whichever you want and uncomment it:
+#
+# repositoryID: 00000000-0000-0000-0000-000000000000
+# owners:
+#   - name: Alchemy86
+#     email: the-address-you-sign-in-to-artifacthub-with
+#
+# Reference: https://artifacthub.io/docs/topics/repositories/

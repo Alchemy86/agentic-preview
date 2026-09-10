@@ -1,6 +1,9 @@
 # Every push and every pull request runs the same four checks the repo's own
 # `docker run ... golang:1.27-alpine` one-liner runs locally (README, "Building
 # and testing"). If the two ever disagree, this file is the one that is wrong.
+#
+# The `chart` job runs beside them so a broken template is found on the commit
+# that broke it, rather than on the tag that tried to publish it.
 name: CI
 
 on:
@@ -49,3 +52,36 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  chart:
+    name: helm lint and template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          # Pinned for the same reason the Go toolchain is: a new Helm release
+          # must not be able to turn this repo red without a commit saying so.
+          # Keep it in step with the `chart` job in release.yml.
+          version: v3.21.4
+
+      - name: helm lint
+        run: helm lint charts/agentic-preview --strict -f charts/example-values.yaml
+
+      - name: helm template
+        # Rendering is the check that matters -- lint reports a failed `fail`
+        # call as INFO and still passes.
+        run: |
+          helm template agentic-preview charts/agentic-preview \
+            --namespace agentic-preview -f charts/example-values.yaml > /dev/null
+
+      - name: allowedNamespaces is still required
+        # The one guarantee the chart makes. If this ever renders, the safety
+        # boundary has a silent default and the guard has stopped working.
+        run: |
+          if helm template agentic-preview charts/agentic-preview >/dev/null 2>&1; then
+            echo "The chart rendered without allowedNamespaces. It must not." >&2
+            exit 1
+          fi
+          echo "Refused without allowedNamespaces, as it should."

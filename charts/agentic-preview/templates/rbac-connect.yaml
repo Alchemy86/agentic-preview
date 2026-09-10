@@ -1,0 +1,38 @@
+{{/*
+ConnectReview: authorizes opening a client session, in the MANAGER's namespace.
+
+This and the attach Roles are what the traffic-manager reviews under
+AUTHENTICATION_MODE=enforcing. Under the default permissive mode an
+unauthenticated caller is let through without a Principal and authorization is
+skipped entirely, so on a permissive manager these grants are never consulted.
+They are declared anyway: the identity should be honest whether or not anything
+is checking, and a later move to enforcing then costs nothing.
+*/}}
+{{- $tmNamespace := required "agentic-preview: trafficManager.namespace is required - it is where the ConnectReview Role is created." .Values.trafficManager.namespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentic-preview.fullname" . }}-connect
+  namespace: {{ $tmNamespace }}
+  labels:
+    {{- include "agentic-preview.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["telepresence.io"]
+    resources: ["connections"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentic-preview.fullname" . }}-connect
+  namespace: {{ $tmNamespace }}
+  labels:
+    {{- include "agentic-preview.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentic-preview.fullname" . }}-connect
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentic-preview.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
