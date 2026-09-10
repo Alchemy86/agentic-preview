@@ -32,9 +32,17 @@ claim in the README. This file does not repeat it.
   `deploy/kustomization.yaml`. `shop` and `checkout-api` are a fictional example service
   used consistently across the repo, not a default. Keep it that way; nothing in this repo
   should name a real cluster, namespace, registry or hostname.
-- **`brand/` is generated, not drawn.** `python3 brand/make.py` reproduces both SVGs byte
-  for byte via [Glyphsmith](https://github.com/Alchemy86/Glyphsmith). Never hand-edit the
-  SVGs. The PNG is derived from the logo SVG — the README has the `magick` command.
+- **`brand/` is generated, not drawn.** `python3 brand/make.py` reproduces all three SVGs
+  byte for byte via [Glyphsmith](https://github.com/Alchemy86/Glyphsmith). Never hand-edit
+  the SVGs. Both PNGs are derived from them — the README's "The mark" section has the
+  `magick` commands. `agentic-preview-social.png` is GitHub's social preview card
+  (1280×640, solid background, set by hand in Settings; there is no API for it).
+- **CI runs exactly the local one-liner above**, in
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml), against the Go version `go.mod`
+  declares rather than the newest release. If the two ever diverge, the workflow is the
+  bug. A `v*` tag additionally publishes the multi-arch image to
+  `ghcr.io/alchemy86/agentic-preview`; `.dockerignore` is an allowlist, so the build
+  context is go.mod, go.sum and `*.go` and nothing else.
 
 ## Maintaining this file
 

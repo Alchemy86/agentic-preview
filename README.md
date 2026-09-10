@@ -4,18 +4,17 @@
 </p>
 
 <p align="center">
-  <a href="#licence"><img alt="Licence: Apache 2.0" src="https://img.shields.io/badge/licence-Apache--2.0-32d46d?style=flat-square" /></a>
-  <img alt="Go" src="https://img.shields.io/badge/go-1.27-32d46d?style=flat-square" />
-  <img alt="Runs in Kubernetes" src="https://img.shields.io/badge/runs%20in-kubernetes-32d46d?style=flat-square" />
+  <a href="https://github.com/Alchemy86/agentic-preview/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Alchemy86/agentic-preview/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
+  <a href="https://github.com/Alchemy86/agentic-preview/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Alchemy86/agentic-preview?sort=semver&amp;label=release" /></a>
 </p>
 
 ---
 
 `agentic-preview` raises header-routed [Telepresence](https://www.telepresence.io/)
-previews from an HTTP call: POST it a work id, a service and an image, and it builds the
-preview and diverts every request carrying that header value to it. It runs as an
-ordinary Deployment inside the cluster — no Telepresence CLI, no connector daemon, no TUN
-device, no root, no laptop, and no human in the loop.
+preview environments in Kubernetes, from an HTTP call: POST it a work id, a service and an
+image, and it builds the preview and diverts every request carrying that header value to
+it. It runs as an ordinary Deployment inside the cluster — no Telepresence CLI, no
+connector daemon, no TUN device, no root, no laptop, and no human in the loop.
 
 The preview is a **copy of the live workload** with your image in it. Same environment,
 same config and secret references, same pull credentials, same probes, same service
@@ -211,16 +210,35 @@ in v2.30.0; earlier managers will raise an intercept but lose it on the first ro
 agentic-preview does not install Telepresence — see
 [the Telepresence install docs](https://www.telepresence.io/docs/install/manager).
 
-**1. Build and push the image.**
+**1. Get the image.** Every `v*` tag publishes one to GitHub's registry, for
+`linux/amd64` and `linux/arm64`:
 
-```bash
-docker build -t registry.example.com/agentic-preview:$(date +%Y%m%d).01 .
-docker push  registry.example.com/agentic-preview:$(date +%Y%m%d).01
+```
+ghcr.io/alchemy86/agentic-preview:0.1.0
 ```
 
 A static binary on `distroless/static-debian12:nonroot`. The Telepresence dependency is
 pinned to an exact commit in `go.mod` and fetched from the module proxy, so no local
-Telepresence checkout is needed.
+Telepresence checkout is needed. The package is public: `docker pull` needs no login.
+
+**Pin the digest, not the tag, in a cluster manifest.** A tag is a pointer that the
+person who owns the registry can move; `:0.1.0` today and `:0.1.0` next month are not
+promised to be the same bytes, and `:latest` is not even trying. A digest *is* the
+bytes — it is the content hash, so a manifest that names one either gets exactly the
+image you tested or fails to pull:
+
+```bash
+docker buildx imagetools inspect ghcr.io/alchemy86/agentic-preview:0.1.0 \
+  --format '{{.Manifest.Digest}}'
+# ghcr.io/alchemy86/agentic-preview@sha256:...
+```
+
+The digest for each published version is printed in that release's workflow summary,
+under **[Actions → Release](https://github.com/Alchemy86/agentic-preview/actions/workflows/release.yml)**.
+Use the tag to find out what is current; put the digest in the YAML.
+
+Building it yourself is still a plain `docker build -t <your-registry>/agentic-preview .`
+away, and nothing in `deploy/` assumes where the image came from.
 
 **2. Replace the four placeholders in `deploy/`.** They are listed, with what each one is
 and where it appears, in the header comment of
@@ -230,7 +248,7 @@ and where it appears, in the header comment of
 | :--- | :--- |
 | `telepresence` | The namespace your traffic-manager runs in — `kubectl get deploy -A \| grep traffic-manager` |
 | `shop` | Each namespace agentic-preview may intercept in, build previews in, and forward to |
-| `registry.example.com/agentic-preview` | Where you pushed the image |
+| `registry.example.com/agentic-preview` | `ghcr.io/alchemy86/agentic-preview@sha256:...`, or wherever you pushed your own build |
 | `agentic-preview` (namespace) | Where the service itself should run, if not there |
 
 `shop` and `checkout-api` throughout this repo are a **fictional example service**, not a
@@ -578,7 +596,10 @@ would require it.
 | `deploy/` | Deployment, Service, ServiceAccount, RBAC, kustomization — four placeholders |
 | `examples/` | Raise (built or your own), list, drop one, drop all — runnable `curl` |
 | `docs/DESIGN.md` | Design notes, RBAC detail, and the measured behaviour behind the claims above |
-| `brand/` | The mark, and the generator that draws it |
+| `brand/` | The mark, the social preview card, and the generator that draws them |
+| `.github/workflows/` | CI on every push and pull request; the image publish on every `v*` tag |
+| `CONTRIBUTING.md` | How to build it, and the three boundaries a change has to respect |
+| `SECURITY.md` | How to report a vulnerability privately, and what is already known |
 
 ### Configuration
 
@@ -610,6 +631,19 @@ docker run --rm -v "$PWD":/src -w /src golang:1.27-alpine \
   sh -c 'gofmt -l . && go vet ./... && go build ./... && go test ./...'
 ```
 
+[CI](.github/workflows/ci.yml) runs those same four checks on every push and pull request,
+against the Go version `go.mod` declares rather than whatever is newest — a Go release
+cannot turn this repo red without a commit that says so. The badge at the top of this page
+is that workflow.
+
+The image:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 .
+```
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest.
+
 ### The mark
 
 `brand/make.py` is the source of truth. It sets the wordmark in
@@ -621,14 +655,27 @@ pip install --user git+https://github.com/Alchemy86/Glyphsmith
 python3 brand/make.py
 ```
 
-`brand/agentic-preview-logo.png` is a **derived artifact**, committed only because GitHub
-cannot render an SVG in a pull request or issue body. Regenerate it whenever the SVG
-changes:
+`make.py` writes three SVGs: the logo, the icon, and `agentic-preview-social.svg` — the
+same mark composed on the 1280×640 panel GitHub renders a repository's social preview card
+in, which is what a link to this repo unfurls to in Slack or Teams.
+
+The two PNGs are **derived artifacts**, committed only because neither GitHub's issue
+bodies nor its social preview setting accept an SVG. Regenerate them whenever the SVGs
+change:
 
 ```bash
 magick -background none brand/agentic-preview-logo.svg \
   -resize 1400x -depth 8 -strip brand/agentic-preview-logo.png
+
+magick brand/agentic-preview-social.svg -background '#0d1117' -flatten \
+  -alpha remove -alpha off -resize 1280x640 -depth 8 -strip \
+  brand/agentic-preview-social.png
 ```
+
+The social card is flattened onto the panel colour rather than left transparent: GitHub
+asks for a solid background, because the card is rendered against whatever the reading
+client's theme happens to be. Setting it is a web-UI action — Settings → Social preview →
+Edit → *Upload an image…* — there is no API for it.
 
 ## Licence
 
