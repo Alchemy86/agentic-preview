@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>agentic-preview Helm chart repository</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="font:16px/1.6 system-ui,-apple-system,sans-serif;max-width:44rem;margin:4rem auto;padding:0 1rem;color:#1f2328">
+<h1 style="margin-bottom:.25rem">agentic-preview</h1>
+<p style="margin-top:0;color:#59636e">Header-routed preview environments in Kubernetes, raised by your pipeline rather than your laptop.</p>
+
+<p>This URL is a <strong>Helm chart repository</strong>, not a web page.</p>
+
+<pre style="background:#f6f8fa;border:1px solid #d1d9e0;border-radius:6px;padding:1rem;overflow-x:auto">helm repo add agentic-preview https://alchemy86.github.io/agentic-preview
+helm repo update
+
+helm install agentic-preview agentic-preview/agentic-preview \
+  --namespace agentic-preview --create-namespace \
+  --set 'allowedNamespaces={your-namespace}'</pre>
+
+<p><code>allowedNamespaces</code> is required and has no default: it is the boundary on
+which namespaces a preview may be intercepted in, built in, and forwarded to. The chart
+refuses to install without it.</p>
+
+<p>
+  <a href="index.yaml">index.yaml</a> &middot;
+  <a href="https://github.com/Alchemy86/agentic-preview">source and documentation</a> &middot;
+  <a href="https://artifacthub.io/packages/search?ts_query_web=agentic-preview">Artifact Hub</a>
+</p>
+</body>
