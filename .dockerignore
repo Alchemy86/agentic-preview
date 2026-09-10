@@ -1,16 +1,9 @@
-# The Dockerfile only needs go.mod, go.sum and *.go. Everything else is context
-# the daemon would ship for nothing.
-/agentic-preview
-.git/
-.gitignore
-Dockerfile
-.dockerignore
-README.md
-AGENTS.md
-CLAUDE.md
-LICENSE
-NOTICE
-brand/
-deploy/
-docs/
-examples/
+# The Dockerfile COPYs exactly three things: go.mod, go.sum and *.go. So this
+# denies the whole context and re-admits only those, rather than listing what
+# to leave out. A denylist has to be updated every time something new appears
+# in the repo root, and it was already behind: the previous one named neither
+# .claude/ nor .github/, so both were being shipped to the daemon for nothing.
+*
+!go.mod
+!go.sum
+!*.go

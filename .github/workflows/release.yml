@@ -1,0 +1,107 @@
+# Publishes the container image to GitHub's own registry when a v* tag is
+# pushed. The package inherits this repository's visibility, so on a public
+# repo the image is publicly pullable with no login and no secret beyond the
+# GITHUB_TOKEN the workflow is handed automatically.
+#
+# The image is built from the same Dockerfile a local `docker build` uses, and
+# only after the CI checks have passed against the tagged commit -- a tag must
+# not be able to publish something that does not compile.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: gofmt, build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  image:
+    name: build and publish image
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Emits the moving tags plus the OCI labels that link the package back to
+      # this repository, this commit and the Apache-2.0 licence.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/alchemy86/agentic-preview
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=agentic-preview
+            org.opencontainers.image.description=Header-routed Telepresence previews, raised from an HTTP call inside the cluster.
+            org.opencontainers.image.licenses=Apache-2.0
+
+      # linux/amd64 and linux/arm64. The build stage runs natively on the
+      # runner and cross-compiles via TARGETARCH, so the second architecture
+      # costs a compile rather than a QEMU emulation.
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # The tags above move; this digest does not. It is the reference a
+      # cluster manifest should pin -- see "How to deploy it" in the README.
+      - name: Record the digest
+        run: |
+          {
+            echo '## Published'
+            echo
+            echo '```'
+            echo 'ghcr.io/alchemy86/agentic-preview@${{ steps.build.outputs.digest }}'
+            echo '```'
+            echo
+            echo 'Tags:'
+            echo '```'
+            echo '${{ steps.meta.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

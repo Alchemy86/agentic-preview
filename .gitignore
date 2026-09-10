@@ -30,3 +30,6 @@ brand/__pycache__/
 *~
 .idea/
 .vscode/
+
+# Local agent configuration. Machine-specific, never shared.
+.claude/

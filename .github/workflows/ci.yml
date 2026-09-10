@@ -1,0 +1,51 @@
+# Every push and every pull request runs the same four checks the repo's own
+# `docker run ... golang:1.27-alpine` one-liner runs locally (README, "Building
+# and testing"). If the two ever disagree, this file is the one that is wrong.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes anything.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: gofmt, build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # go-version-file reads the `go` directive out of go.mod, so the toolchain
+      # is whatever this repo declares and nothing else. Deliberately not
+      # "stable" or "latest": a new Go release must not be able to turn this
+      # repo red overnight without a commit that says so.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
