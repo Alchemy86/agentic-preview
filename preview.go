@@ -8,12 +8,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
 	nameRE   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	workIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 )
+
+// maxPreviewReplicas caps what one request may ask for. A preview is something
+// to look at, not something to load-test against.
+const maxPreviewReplicas = 10
 
 // PreviewRequest adds ONE service to ONE work id.
 //
@@ -51,6 +56,37 @@ type PreviewRequest struct {
 	// Port is the port identifier on the intercepted workload (a service port
 	// name or number). Defaults to 80.
 	Port string `json:"port,omitempty"`
+
+	// ---- Creating the preview, rather than routing to one you deployed ----
+	//
+	// Set Image and agentic-preview builds the preview itself: it reads the
+	// live Deployment named by Workload, copies it with that image in place of
+	// the live one, and creates a Service in front of it. PreviewService is
+	// then derived and must not be given.
+	//
+	// Leave it unset and nothing is created; PreviewService is required and
+	// the service does the routing half only, as it always did.
+
+	// Image is the image reference the preview runs, VERBATIM. Setting it is
+	// what asks for a preview to be built.
+	//
+	// agentic-preview neither parses it nor completes it: no registry is
+	// assumed, no repository is inherited from the live container, no tag
+	// convention is understood. Whatever built and pushed that image knows
+	// where it put it; this service does not, and a service that guessed would
+	// only ever be right for one company's pipeline.
+	Image string `json:"image,omitempty"`
+
+	// Container names which container's image to swap. Only needed when the
+	// live pod has several containers and none is named after the workload.
+	Container string `json:"container,omitempty"`
+
+	// Replicas is how many preview pods to run. Defaults to 1.
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// SourceService is the live Service whose ports the preview Service
+	// copies. Defaults to Workload, which is what it is called almost always.
+	SourceService string `json:"sourceService,omitempty"`
 }
 
 // serviceKey identifies one service within one work id.
@@ -88,6 +124,41 @@ type Preview struct {
 	// AgentPod is the node-agent pod currently carrying this workload's
 	// tunnel; empty when no dial loop is established.
 	AgentPod string `json:"agentPod,omitempty"`
+
+	// Image is the image reference the preview is running, when agentic-preview
+	// built the preview itself. Empty when the caller deployed the preview and
+	// only asked for routing - nothing here reads a Service's pods to find out
+	// what somebody else deployed.
+	//
+	// It is reported by GET /previews so that an adopter running an
+	// image-retention policy can exclude images a live preview references. A
+	// preview that outlives its image survives until its pod is replaced and
+	// then cannot pull, which looks like a fault in this service and is not
+	// one.
+	Image string `json:"image,omitempty"`
+
+	// RaisedAt is when this preview first appeared, and Age is the same thing
+	// in words. They are reported ALWAYS, expiry or no expiry: with expiry
+	// switched off, age is the only thing a person or a supervising process
+	// has to notice previews accumulating.
+	RaisedAt time.Time `json:"raisedAt,omitzero"`
+	Age      string    `json:"age,omitempty"`
+
+	// ExpiresAt is when this preview is swept if nothing touches it before
+	// then. Reported so that an expiry is visible BEFORE it happens and
+	// somebody can extend it rather than discover it went. Zero when expiry is
+	// switched off, in which case nothing removes a preview but a DELETE.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+
+	// Create is what agentic-preview was asked to BUILD for this preview, or
+	// nil when the caller brought their own Service. It is the request's
+	// desired state, kept so a re-POST reconciles onto the same objects.
+	Create *CreateSpec `json:"-"`
+
+	// Created is what it actually built. Nil when it built nothing, which is
+	// also what makes a DELETE safe: it only ever removes objects carrying its
+	// own labels.
+	Created *CreatedObjects `json:"created,omitempty"`
 }
 
 func (p *Preview) key() serviceKey { return serviceKey{p.WorkID, p.Namespace, p.Workload} }
@@ -102,6 +173,11 @@ type Work struct {
 	WorkID   string    `json:"workId"`
 	Header   string    `json:"header"`
 	Services []Preview `json:"services"`
+
+	// ExpiresAt is the soonest any service under this id is swept - the whole
+	// id's remaining life, since anything that touches one service extends
+	// them all.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 }
 
 // validate normalises the request into a Preview. headerName is the service's
@@ -121,6 +197,12 @@ func (r *PreviewRequest) validate(cfg *config) (*Preview, error) {
 	if workload == "" {
 		return nil, fmt.Errorf("workload is required (one service, not a repository)")
 	}
+	// The workload name ends up as a label value on everything created and as
+	// part of every object name, so it has to be a DNS label - which every
+	// Kubernetes workload name already is.
+	if !nameRE.MatchString(workload) {
+		return nil, fmt.Errorf("workload %q must be a DNS label", workload)
+	}
 	if namespace == "" {
 		return nil, fmt.Errorf("namespace is required")
 	}
@@ -129,11 +211,21 @@ func (r *PreviewRequest) validate(cfg *config) (*Preview, error) {
 			namespace, strings.Join(cfg.allowedNamespaces, ", "))
 	}
 
-	svc := strings.TrimSpace(r.PreviewService)
-	if svc == "" {
-		return nil, fmt.Errorf("previewService is required")
+	create, err := r.createSpec(workload, namespace)
+	if err != nil {
+		return nil, err
 	}
+
+	svc := strings.TrimSpace(r.PreviewService)
 	svcNS := strings.TrimSpace(r.PreviewNamespace)
+	if create != nil {
+		// Nothing to name: the preview Service is the one about to be built,
+		// in the namespace the workload it is copied from lives in.
+		svc, svcNS = create.Name, create.Namespace
+	} else if svc == "" {
+		return nil, fmt.Errorf("previewService is required when nothing is being built: " +
+			"either name a Service you deployed yourself, or set image or imageTag and agentic-preview will build the preview")
+	}
 	if host, rest, ok := strings.Cut(svc, "."); ok {
 		svc = host
 		if svcNS == "" {
@@ -168,7 +260,11 @@ func (r *PreviewRequest) validate(cfg *config) (*Preview, error) {
 	}
 
 	port := r.PreviewPort
-	if port == 0 {
+	if port == 0 && create == nil {
+		// Nothing here can read a Service that somebody else deployed, so the
+		// only honest default is the conventional one. When the preview is
+		// built here the port is read off the Service that was just built,
+		// which is why this default does not apply to that path.
 		port = 80
 	}
 	portID := strings.TrimSpace(r.Port)
@@ -192,6 +288,74 @@ func (r *PreviewRequest) validate(cfg *config) (*Preview, error) {
 		TargetService: svc + "." + svcNS,
 		TargetPort:    port,
 		Disposition:   "PENDING",
+		Create:        create,
+	}, nil
+}
+
+// createSpec reads the "build it for me" half of a request. It returns nil when
+// the caller is bringing their own Service, which is the behaviour this service
+// had before it could build anything.
+func (r *PreviewRequest) createSpec(workload, namespace string) (*CreateSpec, error) {
+	image := strings.TrimSpace(r.Image)
+	if image == "" {
+		return nil, nil
+	}
+	// The only thing checked about the reference is that it is made of
+	// characters an image reference is made of. It is not parsed into
+	// registry, repository and tag, and nothing is inferred from any of them:
+	// the caller says what to run and this runs it.
+	if !imageRefRE.MatchString(image) {
+		return nil, fmt.Errorf("image %q is not a usable image reference", image)
+	}
+
+	// The two fields that name where to route to are meaningless when the
+	// thing being routed to is the thing being built. Refusing them beats
+	// silently ignoring a caller who thinks they are choosing something.
+	if strings.TrimSpace(r.PreviewService) != "" {
+		return nil, fmt.Errorf("previewService cannot be given alongside image: " +
+			"agentic-preview names the Service it builds")
+	}
+	if ns := strings.TrimSpace(r.PreviewNamespace); ns != "" && ns != namespace {
+		return nil, fmt.Errorf("previewNamespace %q cannot differ from namespace %q when the preview is built here: "+
+			"the pod template is copied from the live workload and its ConfigMap, Secret and ServiceAccount references only resolve in its own namespace",
+			ns, namespace)
+	}
+
+	source := strings.TrimSpace(r.SourceService)
+	if source == "" {
+		source = workload
+	}
+	if !nameRE.MatchString(source) {
+		return nil, fmt.Errorf("sourceService %q must be a DNS label", source)
+	}
+	if c := strings.TrimSpace(r.Container); c != "" && !nameRE.MatchString(c) {
+		return nil, fmt.Errorf("container %q must be a DNS label", c)
+	}
+
+	replicas := r.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	// A preview exists to be looked at, not to carry load. The cap is here so
+	// that a typo in a pipeline variable cannot fill a node.
+	if replicas < 0 || replicas > maxPreviewReplicas {
+		return nil, fmt.Errorf("replicas must be between 1 and %d, got %d", maxPreviewReplicas, replicas)
+	}
+
+	name := sanitise(workload + "-preview-" + strings.TrimSpace(r.WorkID))
+	if !nameRE.MatchString(name) {
+		return nil, fmt.Errorf("workload %q and workId %q produce an unusable preview name %q",
+			workload, r.WorkID, name)
+	}
+
+	return &CreateSpec{
+		Namespace:      namespace,
+		SourceWorkload: workload,
+		SourceService:  source,
+		Name:           name,
+		Image:          image,
+		Container:      strings.TrimSpace(r.Container),
+		Replicas:       replicas,
 	}, nil
 }
 
@@ -267,6 +431,14 @@ func (r *registry) add(p *Preview) error {
 				p.Name, ex.Workload, ex.Namespace, ex.WorkID)
 		}
 	}
+	// Age is the age of the PREVIEW, not of the last call about it. Re-raising
+	// a service with a newer image is the same preview carrying on, so it
+	// keeps the moment it first appeared.
+	if ex, existed := r.byKey[p.key()]; existed && !ex.RaisedAt.IsZero() {
+		p.RaisedAt = ex.RaisedAt
+	} else if p.RaisedAt.IsZero() {
+		p.RaisedAt = time.Now()
+	}
 	r.byKey[p.key()] = p
 	return nil
 }
@@ -308,9 +480,14 @@ func (r *registry) works() []Work {
 	defer r.mu.RUnlock()
 	byID := map[string][]Preview{}
 	header := map[string]string{}
+	now := time.Now()
 	for _, p := range r.byKey {
-		byID[p.WorkID] = append(byID[p.WorkID], *p)
-		header[p.WorkID] = p.HeaderName + ": " + p.HeaderValue
+		c := *p
+		if !c.RaisedAt.IsZero() {
+			c.Age = now.Sub(c.RaisedAt).Round(time.Second).String()
+		}
+		byID[c.WorkID] = append(byID[c.WorkID], c)
+		header[c.WorkID] = c.HeaderName + ": " + c.HeaderValue
 	}
 	out := make([]Work, 0, len(byID))
 	for id, svcs := range byID {
@@ -320,7 +497,13 @@ func (r *registry) works() []Work {
 			}
 			return svcs[i].Workload < svcs[j].Workload
 		})
-		out = append(out, Work{WorkID: id, Header: header[id], Services: svcs})
+		var expires time.Time
+		for _, p := range svcs {
+			if !p.ExpiresAt.IsZero() && (expires.IsZero() || p.ExpiresAt.Before(expires)) {
+				expires = p.ExpiresAt
+			}
+		}
+		out = append(out, Work{WorkID: id, Header: header[id], Services: svcs, ExpiresAt: expires})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].WorkID < out[j].WorkID })
 	return out
@@ -357,6 +540,40 @@ func (r *registry) workloads() map[string]bool {
 	for _, p := range r.byKey {
 		out[p.agentKey()] = true
 	}
+	return out
+}
+
+// touch extends the life of EVERY service under a work id, because a work id
+// is one change and its services are looked at together: adding the third
+// repository's PR to an id means the first two are still being used.
+//
+// Teardown is explicit. This exists only so that a preview somebody forgot does
+// not sit there forever, and expiry is reported by the API before it happens so
+// that it can be extended rather than discovered.
+func (r *registry) touch(workID string, until time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.byKey {
+		if p.WorkID == workID {
+			p.ExpiresAt = until
+		}
+	}
+}
+
+// expired returns the work ids whose previews are past their expiry.
+func (r *registry) expired(now time.Time) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range r.byKey {
+		if p.ExpiresAt.IsZero() || now.Before(p.ExpiresAt) || seen[p.WorkID] {
+			continue
+		}
+		seen[p.WorkID] = true
+		out = append(out, p.WorkID)
+	}
+	sort.Strings(out)
 	return out
 }
 

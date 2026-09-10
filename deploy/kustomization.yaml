@@ -13,11 +13,12 @@
 #                                   MANAGER_ADDR in deployment.yaml.
 #
 #   2. `shop`                    -> each namespace agentic-preview may intercept
-#                                   in and forward to. It appears in rbac.yaml
-#                                   (one attach Role + RoleBinding per
+#                                   in, build previews in, and forward to. It
+#                                   appears in rbac.yaml (one attach Role and
+#                                   one build Role, each with a RoleBinding, per
 #                                   namespace) and in ALLOWED_NAMESPACES in
-#                                   deployment.yaml. THE TWO MUST STAY IN STEP -
-#                                   see the note in rbac.yaml for why.
+#                                   deployment.yaml. ALL THREE MUST STAY IN STEP
+#                                   - see the note in rbac.yaml for why.
 #
 #   3. registry.example.com/agentic-preview
 #                                -> where you pushed the image built from this

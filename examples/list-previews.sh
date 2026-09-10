@@ -5,7 +5,15 @@
 # With a work id argument, just that one:
 #
 #   ./list-previews.sh          # everything
-#   ./list-previews.sh 4821     # one work id
+#   ./list-previews.sh 1234     # one work id
+#
+# Each work id reports `expiresAt`, and so does each service under it: when the preview
+# is swept if nothing touches it before then. It is reported so you can see you are
+# about to lose one and raise it again to extend it, rather than find out afterwards.
+#
+# Each preview agentic-preview built also reports the `image` it is running. If you run
+# an image-retention policy, that is the list to exclude from it - a preview that
+# outlives its image survives until its pod is replaced and then cannot pull.
 #
 set -euo pipefail
 

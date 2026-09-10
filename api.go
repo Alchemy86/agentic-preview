@@ -2,19 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Handler is the whole API. It is deliberately small: a pipeline calls this,
 // not a person.
 //
-//	POST   /previews                                  add one service to a work id
+//	POST   /previews                                  add one service to a work id,
+//	                                                  building the preview too when asked
 //	GET    /previews                                  list every work id and its services
 //	GET    /previews/{workId}                         one work id's service set
-//	DELETE /previews/{workId}                         remove a whole work id (work done)
-//	DELETE /previews/{workId}/{namespace}/{workload}  remove one service (that PR merged)
+//	DELETE /previews/{workId}                         remove a whole work id
+//	DELETE /previews/{workId}/{namespace}/{workload}  remove one service of it
 //	GET    /healthz                                   liveness
 //	GET    /readyz                                    ready once a manager session exists
 func (s *Server) Handler() http.Handler {
@@ -91,16 +94,62 @@ func (s *Server) handleAdd(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Build the preview before anything is decided about the intercept.
+	//
+	// It runs BEFORE the idempotency check below rather than after, because it
+	// is what fills in the port the intercept forwards to - read off the
+	// Service it just built - and because it is itself idempotent: a pipeline
+	// retry reconciles the same two objects, and a work id re-raised with a
+	// newer tag rolls the Deployment forward in place.
+	if p.Create != nil {
+		if err := s.createWorkload(req.Context(), p); err != nil {
+			var re requestError
+			if errors.As(err, &re) {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+
 	// Idempotent by design: a pipeline retries, and re-POSTing a service that
 	// is already previewed under this work id must not disturb it. Raising it
 	// again would collide with our own live intercept on identical header
 	// filters, which is a pointless way to fail a retry.
 	if prev, existed := s.reg.get(p.key()); existed {
-		if prev.TargetService == p.TargetService && prev.TargetPort == p.TargetPort && prev.PortID == p.PortID {
+		sameTarget := prev.TargetService == p.TargetService &&
+			prev.TargetPort == p.TargetPort && prev.PortID == p.PortID
+
+		if sameTarget && prev.Image == p.Image {
+			s.extend(p.WorkID)
 			work, _ := s.reg.work(p.WorkID)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"unchanged": prev,
 				"work":      work,
+			})
+			return
+		}
+
+		// The image moved but the intercept did not: a new commit under the
+		// same work id. createWorkload has already rolled the Deployment
+		// forward in place, and the intercept still points at the same Service
+		// on the same port - so tearing it down and raising it again would be
+		// a gap in routing for no gain. Carry the live intercept's state onto
+		// the new record and say plainly that it rolled rather than that
+		// nothing happened.
+		if sameTarget {
+			p.Disposition, p.Message, p.AgentPod = prev.Disposition, prev.Message, prev.AgentPod
+			if err := s.reg.add(p); err != nil {
+				writeErr(w, http.StatusConflict, err.Error())
+				return
+			}
+			s.extend(p.WorkID)
+			work, _ := s.reg.work(p.WorkID)
+			logf("%s rolled forward to %s", p.Name, p.Image)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"rolled": p,
+				"work":   work,
 			})
 			return
 		}
@@ -126,11 +175,22 @@ func (s *Server) handleAdd(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	s.extend(p.WorkID)
 	work, _ := s.reg.work(p.WorkID)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"raised": p,
 		"work":   work,
 	})
+}
+
+// extend pushes every preview under a work id out to a fresh lifetime. Any
+// contact with an id counts - re-raising a service, or adding another one -
+// because a work id is one change and its services are used together.
+func (s *Server) extend(workID string) {
+	if s.cfg.lifetime <= 0 {
+		return
+	}
+	s.reg.touch(workID, time.Now().Add(s.cfg.lifetime))
 }
 
 func (s *Server) handlePreviewPath(w http.ResponseWriter, req *http.Request) {
@@ -162,41 +222,52 @@ func (s *Server) handlePreviewPath(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// handleRemoveWork removes every service previewed under a work id - the whole
-// change is done.
+// handleRemoveWork removes every service previewed under a work id, and every
+// object agentic-preview built for it.
+//
+// Teardown is EXPLICIT and this is the only thing that asks for it, apart from
+// the expiry sweep behind it. Nothing removes a preview because a pull request
+// merged, closed or changed state: the change may still be being tested against
+// the preview after it merges, and this service has no opinion about pull
+// requests in any case.
 func (s *Server) handleRemoveWork(w http.ResponseWriter, req *http.Request, workID string) {
-	ps := s.reg.removeWork(workID)
-	if len(ps) == 0 {
+	removed, deleted, problems, found := s.tearDownWork(req.Context(), workID)
+	if !found {
 		writeErr(w, http.StatusNotFound, fmt.Sprintf("work id %q has nothing live", workID))
 		return
 	}
-	removed := make([]string, 0, len(ps))
-	var problems []string
-	for _, p := range ps {
-		if err := s.remove(req.Context(), p); err != nil {
-			problems = append(problems, err.Error())
-		}
-		removed = append(removed, p.Workload+"."+p.Namespace)
-	}
 	body := map[string]any{"workId": workID, "removed": removed}
+	if len(deleted) > 0 {
+		body["deleted"] = deleted
+	}
 	if problems != nil {
 		body["problems"] = problems
 	}
 	writeJSON(w, http.StatusOK, body)
 }
 
-// handleRemoveService removes one service from a work id - that repo's PR
-// merged, while the rest of the change is still in flight.
+// handleRemoveService removes one service from a work id while the rest of the
+// change stays up - one repository's part of it is finished with, the others
+// are not.
 func (s *Server) handleRemoveService(w http.ResponseWriter, req *http.Request, k serviceKey) {
 	p, ok := s.reg.removeService(k)
-	if !ok {
+	deleted, problems := s.dropWorkload(req.Context(), k.WorkID, k.Workload)
+	if !ok && len(deleted) == 0 {
 		writeErr(w, http.StatusNotFound,
 			fmt.Sprintf("work id %q is not previewing %s.%s", k.WorkID, k.Workload, k.Namespace))
 		return
 	}
-	body := map[string]any{"workId": k.WorkID, "removed": p.Workload + "." + p.Namespace}
-	if err := s.remove(req.Context(), p); err != nil {
-		body["problems"] = []string{err.Error()}
+	body := map[string]any{"workId": k.WorkID, "removed": k.Workload + "." + k.Namespace}
+	if ok {
+		if err := s.remove(req.Context(), p); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if len(deleted) > 0 {
+		body["deleted"] = deleted
+	}
+	if problems != nil {
+		body["problems"] = problems
 	}
 	if work, stillLive := s.reg.work(k.WorkID); stillLive {
 		body["work"] = work

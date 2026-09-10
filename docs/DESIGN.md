@@ -11,11 +11,14 @@
 telepresence CLI, no connector daemon, no TUN device, no root, no laptop, no human. It
 runs as an ordinary Deployment and a pipeline drives it.
 
-It takes over **only the intercept half** of a preview. Something else — your CI pipeline,
-a Helm chart, a script — must already have deployed the preview build of the service and
-given it a `Service` to be reached on. agentic-preview's job starts there: it tells the
-traffic-manager to divert requests carrying one header to that Service, and holds the
-tunnel that carries them.
+It takes a whole preview in one call. Give it a work id, a service, a namespace and an
+image reference: it reads the live Deployment, copies it with your image in place of the
+live one, puts a `Service` in front of the copy, tells the traffic-manager to divert
+requests carrying one header to that Service, and holds the tunnel that carries them.
+
+It does not build the image and it does not decide when to call — your CI already knows
+both. Give it a `previewService` instead of an `image` and it skips the building entirely
+and does the intercept half only, which is what it did before it could create anything.
 
 > **About the numbers in this document.** Every figure quoted here — the 0.31s fall-through,
 > the 18s rollout window, the hang after 15s and 90s, the 24h TTL — was measured on a real
@@ -56,20 +59,22 @@ A work id is the primary key, and it is the header **value**.
 
 A change spans repositories — the API, the worker, a shared client library — as separate
 PRs, and all of them must be reachable behind *one* header or the feature cannot be tested
-end to end. So the caller supplies a work id, whatever id your issue tracker gives one
-piece of work, never a PR number, and services join that id incrementally as each repo's
-PR builds.
+end to end. So the caller supplies a work id — any string they pick — and services join
+that id incrementally as each repo's build lands. It is deliberately not a PR number: one
+piece of work has several PRs and they must share a header. agentic-preview never parses
+it; it is the header value and a label, and nothing else.
 
 The unit is a **service, never a repository**: one namespace commonly holds a dozen
 services, and a PR touching only checkout must preview checkout and nothing else. The
 caller states the service; agentic-preview never infers a service set from a repo.
 
 ```
-POST   /previews                                  add one service to a work id
+POST   /previews                                  build a preview of one service and
+                                                  route its header
 GET    /previews                                  every work id and what it spans
 GET    /previews/{workId}                         one work id's service set
-DELETE /previews/{workId}/{namespace}/{workload}  that repo's PR merged
-DELETE /previews/{workId}                         the whole change is done
+DELETE /previews/{workId}/{namespace}/{workload}  remove one service of a work id
+DELETE /previews/{workId}                         remove a whole work id
 GET    /healthz                                   liveness
 GET    /readyz                                    ready only once a manager session exists
 ```
@@ -77,14 +82,40 @@ GET    /readyz                                    ready only once a manager sess
 ```bash
 curl -XPOST http://agentic-preview.agentic-preview.svc.cluster.local/previews \
   -H 'content-type: application/json' \
-  -d '{"workId":"4821","workload":"checkout-api","namespace":"shop",
-       "previewService":"checkout-api-preview-pr4821"}'
+  -d '{"workId":"1234","workload":"checkout-api","namespace":"shop",
+       "image":"registry.example.com/checkout-api:pr-1234","port":"http"}'
 ```
 
-`previewService` accepts `name` or `name.namespace`, and defaults to the workload's
-namespace. `previewPort` defaults to 80; `port` (the port identifier on the intercepted
-workload) defaults to 80. POSTing the same work id **adds** to its set; POSTing the same
-work id *and* service refreshes that one entry. It never replaces the set.
+**`image` is what asks for a preview to be built.** With it, agentic-preview reads the live
+Deployment named by `workload`, deep-copies its pod template, puts that image on the chosen
+container, and creates `<workload>-preview-<workId>` plus a Service selecting it — then
+points the intercept at that Service. The reference is used verbatim; nothing about a
+registry or a tag convention is assumed or read.
+
+**Without it, nothing is built** and `previewService` is required, which is the behaviour
+this service had before it could create anything. `previewService` accepts `name` or
+`name.namespace` and defaults to the workload's namespace; `previewPort` defaults to 80.
+The two are mutually exclusive — when the preview is built here, its Service is named and
+its port read off the Service that was just created.
+
+`port` (the port identifier on the intercepted workload) defaults to 80. POSTing the same
+work id **adds** to its set; POSTing the same work id *and* service rolls that one preview
+forward in place. It never replaces the set.
+
+### Teardown, and the timer behind it
+
+Teardown is **explicit**: a `DELETE` removes the intercepts and every object agentic-preview
+built, found by the `app.kubernetes.io/managed-by=agentic-preview` label it puts on them
+rather than by the in-memory record — so it works after a restart too. Nothing removes a
+preview because a pull request merged, closed or changed state; work carries on against a
+preview after a merge, and this service has no notion of a pull request in any case.
+
+The one thing that removes a preview on its own is `PREVIEW_LIFETIME`, a safety net against
+forgotten previews. It defaults to 24 hours, any contact with a work id extends every
+preview in that id, and `GET /previews` reports each preview's age and expiry so that an
+expiry is visible before it arrives. It can be switched off (`off`, `never`, `0`) and should
+be, by an adopter with something else minding their previews — off is an explicit choice so
+that anyone who does not read the configuration still gets the safe timer.
 
 **The header name is service-level configuration, not a request field** (`HEADER_NAME`,
 default `x-preview`). That is deliberate: if two services under one work id could be given
@@ -108,6 +139,15 @@ reaches all of them — would be lost.
   path as the first connection rather than a special case.
 - **Many previews per process.** One session, one tunnel per agent pod, any number of
   previews.
+- **Builds the preview from the LIVE workload.** A script that templates a Deployment gets
+  three chances to be wrong — the image, the pull credentials, the configuration — and the
+  three attempts that preceded this design took all three. Copying the live pod template
+  carries the environment, the `envFrom` ConfigMap and Secret references, the volumes, the
+  `imagePullSecrets`, the probes, the resources and the service account across without
+  anybody enumerating them, and it stays correct when the live workload changes.
+- **Refuses a preview that live traffic could claim.** The copied pod labels are checked
+  against every Service selector in the namespace before anything is created, so a preview
+  pod can never join the live EndpointSlice.
 - **Sweeps its own orphans** — see below.
 - **Token-first.** Bearer ServiceAccount token on every manager call (re-read from disk each
   time, because a projected token is rotated in place), `GetSessionCredential` for a
@@ -131,21 +171,42 @@ checking, and a later move to `enforcing` then costs agentic-preview nothing.
 | `ConnectReview` | `create` `connections.telepresence.io` | the traffic-manager's own |
 | `AttachmentReview` | `create`, `get` `attachments.telepresence.io` | each intercept namespace |
 
-**`ALLOWED_NAMESPACES` IS the boundary, and it bounds BOTH directions** — the namespace a
-preview is intercepted in, and the namespace it is forwarded to. Both are checked, and the
-refusal says which of the two it means, because they are different request fields
-(`namespace` against `previewService`/`previewNamespace`) and a vague message sends a
-caller to change the wrong one. `ALLOWED_NAMESPACES` is required and has no default — an
-empty list read as "everything" is the wrong failure.
+The build permissions are different in kind and are **not** reviewed by the manager at all —
+they are used directly against the Kubernetes API and are enforced whatever the manager's
+authentication mode is:
 
-**The two directions are not bounded by the same thing, which is the part worth
-understanding.** The attachment Roles bound interception only: intercepting a workload is
-an operation the manager authorizes. Forwarding is not — the far end of the tunnel is a
-plain `net.Dial` from this pod to a ClusterIP, and no Kubernetes permission is consulted
-for it. So the forward target is bounded by the in-process check and nothing else, in
-enforcing mode exactly as in permissive. Keep the Roles and `ALLOWED_NAMESPACES` in step:
-the Roles are the only thing standing between the list and interception, and the list is
-the only thing standing between a caller and forwarding anywhere in the cluster.
+| Grant | Namespace | What it is for |
+| :--- | :--- | :--- |
+| `get`, `list`, `create`, `update`, `delete` `deployments.apps` | each preview namespace | `get` reads the live Deployment the preview is copied from, and the preview's own status while waiting for its pods. `create` makes it; `update` rolls it forward when the same work id is re-raised with a new image; `list` finds the tool's own objects by its own label; `delete` removes them. |
+| `get`, `list`, `create`, `update`, `delete` `services` | each preview namespace | `get` reads the live Service to copy its ports. `list` twice: to find the tool's own Services, and to check no other Service's selector would claim the preview's pods. `create`, `update`, `delete` as above. |
+| `list` `pods` | each preview namespace | Read-only, and only to report *why* a preview's pods are not running — `ErrImagePull: manifest unknown` beats "not ready". |
+
+Never a ClusterRole. Nothing on ConfigMaps or Secrets: the preview **references** the live
+ones, it never reads their contents. No `patch`, no `deletecollection`.
+
+`delete` on Deployments in a namespace is `delete` on any Deployment in that namespace —
+RBAC cannot be narrowed by label. What narrows it is the code: every delete lists by the
+tool's own `app.kubernetes.io/managed-by` label, re-checks that label on each object, and
+deletes by name. `update` is guarded the same way. Both guards are pinned by tests in
+`workload_test.go`.
+
+**`ALLOWED_NAMESPACES` IS the boundary, and it bounds ALL THREE directions** — the
+namespace a preview is intercepted in, the namespace it is built in, and the namespace it
+is forwarded to. All are checked, and the refusal says which of them it means, because they
+are different request fields (`namespace` against `previewService`/`previewNamespace`) and
+a vague message sends a caller to change the wrong one. `ALLOWED_NAMESPACES` is required
+and has no default — an empty list read as "everything" is the wrong failure.
+
+**The three are not bounded by the same thing, which is the part worth understanding.** The
+attachment Roles bound interception only: intercepting a workload is an operation the
+manager authorizes. The build Roles bound creation, and being ordinary namespaced RBAC they
+hold even if the in-process check were wrong. Forwarding is bounded by neither — the far
+end of the tunnel is a plain `net.Dial` from this pod to a ClusterIP, and no Kubernetes
+permission is consulted for it. So the forward target is bounded by the in-process check
+and nothing else, in enforcing mode exactly as in permissive. Keep both sets of Roles and
+`ALLOWED_NAMESPACES` in step: the Roles are what stands between the list and interception
+or creation, and the list is the only thing standing between a caller and forwarding
+anywhere in the cluster.
 
 The attachment Role is left unnamed (no `resourceNames`) because the manager also performs
 an unnamed namespace-wide attachments review (`auth.NamespaceReview`), which a grant scoped
@@ -210,6 +271,18 @@ three orphans and restored routing.
 There is also a best-effort session id recorded to `STATE_FILE`, departed on startup. It is
 on an `emptyDir`, so it survives a container restart but not a pod replacement — the
 conflict-driven sweep above is the one that matters.
+
+**Preview workloads are not swept on stop, and that is deliberate.** SIGTERM removes every
+intercept, because an orphaned intercept makes its header hang. It leaves the Deployments
+and Services alone: a preview is a thing somebody is looking at, and destroying every
+preview in the cluster on each rollout of this service would be its own outage. They are
+labelled `app.kubernetes.io/managed-by=agentic-preview` with the work id beside them, so a
+restarted process — which has forgotten its in-memory registry — can still be asked to
+remove them, because a `DELETE` finds them by label rather than by memory:
+
+```bash
+kubectl get deploy,svc -A -l app.kubernetes.io/managed-by=agentic-preview
+```
 
 `CLIENT_CONNECTION_TTL` on the measured cluster was **24h** (verified on the traffic-manager
 deployment; the GC loop expires client sessions on that TTL every 5s, agent sessions after

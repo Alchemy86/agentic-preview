@@ -1,7 +1,18 @@
 # agentic-preview authenticates to the traffic-manager with its ServiceAccount's
 # projected token, which the manager resolves with a Kubernetes TokenReview.
 #
-# These two Roles are what the manager reviews under
+# There are THREE Roles here and they do different jobs:
+#
+#   agentic-preview-connect  opening a client session, in the MANAGER's namespace
+#   agentic-preview-attach   intercepting a workload, in the WORKLOAD's namespace
+#   agentic-preview-build    building the preview itself, in the WORKLOAD's namespace
+#
+# The first two are reviewed by the traffic-manager. The third is used directly
+# against the Kubernetes API by this service and IS ENFORCED WHATEVER THE
+# MANAGER IS DOING - it is the safety boundary for the half of the service that
+# creates workloads, so it is the one to read carefully.
+#
+# The first two Roles are what the manager reviews under
 # AUTHENTICATION_MODE=enforcing. Under the default permissive mode an
 # unauthenticated caller is let through without a Principal and authorization is
 # skipped entirely - so on a permissive manager these grants are never
@@ -42,17 +53,23 @@ subjects:
 # AttachmentReview: authorizes intercepting a workload, in the WORKLOAD's
 # namespace. ONE Role AND RoleBinding PER NAMESPACE agentic-preview may
 # intercept in - copy this pair for each one, and keep the set identical to
-# ALLOWED_NAMESPACES in deployment.yaml.
+# ALLOWED_NAMESPACES in deployment.yaml and to the build Role at the bottom of
+# this file.
 #
 # PLACEHOLDER (2): `shop` -> a namespace holding workloads you want to preview.
 #
-# This bounds INTERCEPTION, and only interception. The other half of a preview
-# is the forward target, which is a plain net.Dial from the pod to a ClusterIP
-# that no Kubernetes permission is consulted for - so no Role can bound it, and
-# ALLOWED_NAMESPACES on the Deployment is the only thing that does. That is why
-# the list is stated in both places and why they must stay in step: this Role is
-# what stands between the list and interception, and that env var is what stands
-# between a caller and forwarding anywhere in the cluster.
+# This bounds INTERCEPTION, and only interception. A preview has three ends and
+# they are bounded by three different things:
+#
+#   intercepting  this Role, reviewed by the traffic-manager
+#   building      the build Role at the bottom of this file, enforced by
+#                 Kubernetes itself
+#   forwarding    NOTHING but ALLOWED_NAMESPACES. It is a plain net.Dial from
+#                 the pod to a ClusterIP and no Kubernetes permission is
+#                 consulted for it, so no Role can bound it.
+#
+# That is why the namespace list is stated in three places and why they must
+# stay in step.
 #
 # Left unnamed (no resourceNames) on purpose: the manager also performs an
 # unnamed namespace-wide attachments review (auth.NamespaceReview), which a
@@ -82,6 +99,94 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: agentic-preview-attach
+subjects:
+  - kind: ServiceAccount
+    name: agentic-preview
+    namespace: agentic-preview
+---
+# The build Role: creating the preview Deployment and Service.
+#
+# ONE Role AND RoleBinding PER NAMESPACE, exactly like the attach Role above,
+# and the same set - a caller must not be able to create a workload in a
+# namespace that is not on ALLOWED_NAMESPACES, and a namespace-scoped Role is
+# what makes that true even if the in-process check were wrong. NEVER a
+# ClusterRole: cluster-wide create and delete on Deployments is the whole
+# cluster, and nothing here needs to see outside the namespaces it previews in.
+#
+# PLACEHOLDER (2): `shop` -> the same namespace as the attach Role above.
+#
+# What each verb is for, and there is nothing here that is not used:
+#
+#   deployments  get     read the LIVE Deployment, which the preview is a copy
+#                        of. This is the whole design: the preview carries the
+#                        live workload's environment, its ConfigMap and Secret
+#                        references, its pull credentials, its probes and its
+#                        service account because they were COPIED from it.
+#                get     also reads back the preview's own status while waiting
+#                        for its pods to come up.
+#                create  make the preview Deployment.
+#                update  roll a preview forward when the same work id is raised
+#                        again with a different image, without the gap a delete
+#                        and re-create would leave. Guarded in code: an object
+#                        that does not carry the tool's managed-by label is
+#                        never written to.
+#                list    find the tool's own objects, by its own label, so a
+#                        DELETE can remove them - including after a restart,
+#                        which loses the in-memory record of what exists.
+#                delete  remove them.
+#
+#   services     get     read the LIVE Service, to copy its ports so the preview
+#                        answers on the same ones.
+#                list    twice: to find the tool's own Services for a DELETE,
+#                        and - before creating anything - to check that the
+#                        preview's pod labels, copied from live, are not still
+#                        selected by some OTHER Service in the namespace. A pod
+#                        that is would put unreviewed code into live traffic.
+#                create  make the preview Service.
+#                update  keep it in step when a preview is re-raised. Same
+#                        label guard as Deployments.
+#                delete  remove it.
+#
+#   pods         list    read why a preview's pods are not running, so a POST
+#                        that fails says "ErrImagePull: manifest unknown" rather
+#                        than "not ready". Read-only, and it is the difference
+#                        between a diagnosable failure and a mystery.
+#
+# NOT granted, deliberately: nothing on ConfigMaps or Secrets (the preview
+# REFERENCES the live ones, it does not read or copy their contents), nothing on
+# Ingress or any ingress controller's CRDs (traffic arrives through the header,
+# not a new front door), no `patch` (update covers it), no `deletecollection`
+# (every delete names one object that was first found under this tool's own
+# label), and nothing at all outside these namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentic-preview-build
+  namespace: shop
+  labels:
+    app: agentic-preview
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentic-preview-build
+  namespace: shop
+  labels:
+    app: agentic-preview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentic-preview-build
 subjects:
   - kind: ServiceAccount
     name: agentic-preview

@@ -3,6 +3,11 @@
 // daemon, no TUN device, no root, no laptop: it runs as an ordinary Deployment
 // and a pipeline drives it over HTTP.
 //
+// One call does the whole job. Given an image reference it BUILDS the preview -
+// by copying the live Deployment, image swapped, so that everything the pod
+// needs to run comes across rather than being invented - creates a Service in
+// front of it, and then routes the header to it. See workload.go.
+//
 // It is long-lived by necessity rather than by choice. InterceptSpec.target_host
 // reads like an address the traffic-agent connects to, but the agent never
 // dials it: for each intercepted request it opens a tunnel back to the CLIENT
@@ -53,6 +58,11 @@ func main() {
 	r.SweepPreviousSession(sigCtx)
 
 	go r.Run(runCtx)
+
+	// The expiry sweep. It is a safety net against forgotten previews and not
+	// a teardown policy: previews go when somebody asks, or when nothing has
+	// touched them for PREVIEW_LIFETIME.
+	go r.ReapExpired(runCtx)
 
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,

@@ -33,18 +33,18 @@ func TestAllowListBoundsBothDirections(t *testing.T) {
 		wantNS  string // expected forward-target namespace when accepted
 	}{{
 		name: "forward target defaults to the intercepted namespace",
-		req: PreviewRequest{WorkID: "4821", Workload: "checkout-api",
+		req: PreviewRequest{WorkID: "1234", Workload: "checkout-api",
 			Namespace: "shop", PreviewService: "checkout-api-preview"},
 		wantNS: "shop",
 	}, {
 		name: "forward target named explicitly and on the list",
-		req: PreviewRequest{WorkID: "4821", Workload: "checkout-api",
+		req: PreviewRequest{WorkID: "1234", Workload: "checkout-api",
 			Namespace: "shop", PreviewService: "some-preview",
 			PreviewNamespace: "previews"},
 		wantNS: "previews",
 	}, {
 		name: "forward target embedded as name.namespace and on the list",
-		req: PreviewRequest{WorkID: "4821", Workload: "checkout-api",
+		req: PreviewRequest{WorkID: "1234", Workload: "checkout-api",
 			Namespace: "shop", PreviewService: "some-preview.previews"},
 		wantNS: "previews",
 	}, {
@@ -122,14 +122,14 @@ func TestRefusalNamesTheFieldItMeans(t *testing.T) {
 func TestHeaderValueIsTheWorkID(t *testing.T) {
 	cfg := cfgFor("shop")
 	for _, workload := range []string{"checkout-api", "pricing-api"} {
-		req := PreviewRequest{WorkID: "4821", Workload: workload,
+		req := PreviewRequest{WorkID: "1234", Workload: workload,
 			Namespace: "shop", PreviewService: workload + "-preview"}
 		p, err := req.validate(cfg)
 		if err != nil {
 			t.Fatalf("%s: %v", workload, err)
 		}
-		if p.HeaderName != "x-preview" || p.HeaderValue != "4821" {
-			t.Fatalf("%s: header is %s: %s, want x-preview: 4821", workload, p.HeaderName, p.HeaderValue)
+		if p.HeaderName != "x-preview" || p.HeaderValue != "1234" {
+			t.Fatalf("%s: header is %s: %s, want x-preview: 1234", workload, p.HeaderName, p.HeaderValue)
 		}
 	}
 }

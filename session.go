@@ -57,6 +57,12 @@ type Server struct {
 	// managerVersion is reported by the API for diagnosis.
 	managerVersion string
 	agents         *agentPool
+	// kube is the Kubernetes API client used to BUILD previews. It is nil when
+	// there is no in-cluster config - the routing half needs nothing from
+	// Kubernetes, so that is a per-request refusal rather than a fatal one.
+	// kubeErr says why, so the refusal can name the reason.
+	kube    kubeAPI
+	kubeErr error
 	// ready is closed once a session exists, so the API can report honestly.
 	connected bool
 	// raiseMu serialises intercept creation: PrepareIntercept provisions the
@@ -67,6 +73,12 @@ type Server struct {
 func NewServer(cfg *config) *Server {
 	s := &Server{cfg: cfg, reg: newRegistry()}
 	s.agents = newAgentPool(s)
+	if k, err := newKubeAPI(); err != nil {
+		s.kubeErr = err
+		logf("no Kubernetes API client: %v - previews must be deployed elsewhere and named with previewService", err)
+	} else {
+		s.kube = k
+	}
 	return s
 }
 
