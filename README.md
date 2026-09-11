@@ -193,11 +193,48 @@ Roles, and `ALLOWED_NAMESPACES` on the container — from that one list, which i
 place they cannot drift. With the raw manifests, you keep both sets of Roles in
 `deploy/rbac.yaml` and the env var in `deploy/deployment.yaml` naming the same set yourself.
 
+### The `kubectl` plugin
+
+One file, onto your PATH. kubectl finds it by name — the underscore is what becomes the
+space in `kubectl agentic-preview`:
+
+```bash
+curl -fsSLo ~/.local/bin/kubectl-agentic_preview https://raw.githubusercontent.com/Alchemy86/agentic-preview/main/hack/kubectl-agentic_preview
+chmod +x ~/.local/bin/kubectl-agentic_preview
+```
+
+It is a shell script over `kubectl` and nothing else — no binary, no Go client, no
+credentials of its own. Installed the service somewhere other than a namespace called
+`agentic-preview`? `export AGENTIC_PREVIEW_NAMESPACE=<ns>`.
+**More:** [docs/PLUGIN.md](docs/PLUGIN.md).
+
 **Full install reference**, including digest pinning, the placeholder table and the
 traffic-manager namespace: **[docs/INSTALL.md](docs/INSTALL.md)**. Every environment
 variable: **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
-## The API
+## Using it
+
+Raising a preview and dropping it again are one command each:
+
+```bash
+kubectl agentic-preview up checkout-api -n shop \
+    -i registry.example.com/checkout-api:pr-1234 -w 1234 -p http
+
+curl -H 'x-preview: 1234' https://your-ingress/checkout   # your preview
+curl                      https://your-ingress/checkout   # live, unchanged and unaware
+
+kubectl agentic-preview down 1234
+```
+
+`list` shows every work id, what it spans, the image each preview runs and when it
+expires; `status` reports the manager session and one entry per live tunnel. There is no
+port-forward and no URL anywhere in that, because the plugin reaches the service through
+the API server's own service proxy. `kubectl agentic-preview --help` is the whole manual.
+
+### The API
+
+The plugin is a wrapper over an HTTP API and holds no privileges of its own. A pipeline
+step should call that API directly.
 
 ```
 POST   /previews                                  build a preview of one service and
@@ -232,19 +269,13 @@ curl -XPOST http://agentic-preview.agentic-preview.svc.cluster.local/previews \
 | `port` | The port identifier on the *live* workload — a service port name or number. Default `80`. |
 | `previewService` | Instead of `image`: route to a Service **you** deployed. The two are mutually exclusive. |
 
-Then reach it through the cluster's normal ingress, with the header:
-
-```bash
-curl -H 'x-preview: 1234' https://your-ingress/checkout
-```
-
 POSTing the same work id again **adds** a service to it; the same work id *and* service with
 the same image is a no-op, and with a new image rolls the Deployment forward without
 touching the intercept — so a pipeline retry is safe and a new commit is one call.
 
-Runnable versions of all five operations are in **[`examples/`](examples/)** — plain `curl`;
-the API is small enough that a wrapper would only hide it. Every field and response in full:
-[docs/DESIGN.md](docs/DESIGN.md#the-api).
+Runnable versions of all five operations are in **[`examples/`](examples/)** — plain `curl`,
+because a pipeline step is going to be a `curl` anyway. Every field and response in full:
+[docs/DESIGN.md](docs/DESIGN.md#the-api); the plugin: [docs/PLUGIN.md](docs/PLUGIN.md).
 
 ## What it deliberately does not do
 
@@ -312,7 +343,8 @@ Each of these in full, with the code-level evidence: **[docs/LIMITS.md](docs/LIM
 ---
 
 **More detail:** [design and measured behaviour](docs/DESIGN.md) ·
-[installing](docs/INSTALL.md) · [configuration](docs/CONFIGURATION.md) ·
+[installing](docs/INSTALL.md) · [the kubectl plugin](docs/PLUGIN.md) ·
+[configuration](docs/CONFIGURATION.md) ·
 [worked example](docs/WORKED-EXAMPLE.md) · [non-goals](docs/NON-GOALS.md) ·
 [limits](docs/LIMITS.md) ·
 [building and testing](docs/DEVELOPING.md) · [the chart](docs/CHART.md) ·

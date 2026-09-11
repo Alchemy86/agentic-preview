@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+#
+# kubectl agentic-preview - raise, list and drop header-routed previews.
+#
+# The filename's underscore is not a typo: kubectl maps an executable named
+# kubectl-agentic_preview on PATH to the command "kubectl agentic-preview".
+#
+# It reaches the in-cluster service through the API server's own service proxy:
+#
+#   /api/v1/namespaces/<ns>/services/<svc>:80/proxy/previews
+#
+# so there is no port-forward to hold open, no tunnel, no extra pod and no URL
+# to know. It shells out to kubectl for every call ON PURPOSE - that inherits
+# the user's kubeconfig, context, auth plugin and proxy settings for free, and
+# adds no dependency beyond the kubectl already running it.
+#
+# Everything this can ask for, the HTTP API can also be asked for directly with
+# curl; see examples/ in the repository. This is the same API with the
+# transport and the JSON body taken off the user.
+set -euo pipefail
+
+# Where the agentic-preview Service itself lives. These are the names the
+# repository's own deploy/ and chart install under; override them only if you
+# installed it somewhere else.
+SERVICE_NS=${AGENTIC_PREVIEW_NAMESPACE:-agentic-preview}
+SERVICE=${AGENTIC_PREVIEW_SERVICE:-agentic-preview}
+
+PROG='kubectl agentic-preview'
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat <<USAGE
+$PROG - header-routed preview environments, from the command line.
+
+  Raise a preview of one workload running your image, and every request
+  carrying one header value is diverted to it. Everything without the header
+  reaches the live pod, unchanged and unaware.
+
+  COMMANDS
+    up <workload> -n <namespace> -i <image> [-w <work-id>]
+        Build a preview of <workload> from <image> and route a header to it.
+        Repeat with the same -w to add more workloads under one header - that
+        is how a change spanning several repositories ends up behind one.
+        Repeat with the same -w AND workload to roll it forward to a new image.
+
+    list [<work-id>]
+        What is up: every work id, the workloads it spans, the image each
+        preview runs, its age and when it expires. With a work id, just that
+        one. Prints the API's JSON.
+
+    down <work-id> [<workload> -n <namespace>]
+        Tear down. With a work id alone, the whole change goes - every
+        intercept and every object built for it. With a workload as well, only
+        that one workload leaves the work id and the rest stays up.
+
+    status
+        The manager session, the allowed-namespace list, and one entry per live
+        tunnel. This is /readyz; read it when a preview is up but not routing.
+
+  FLAGS for up
+    -n, --namespace <ns>      Namespace of the workload being previewed.
+                              Required: it has no safe default, and it must be
+                              one of the service's ALLOWED_NAMESPACES.
+    -i, --image <ref>         The image to run, used VERBATIM. Setting it is
+                              what asks for a preview to be built.
+    -w, --work-id <id>        The header value, and the key everything is
+                              grouped under. Any string you pick; never parsed.
+                              Defaults to the image tag - see NOTES.
+    -p, --port <name|number>  Port identifier on the LIVE workload. Default 80.
+    -r, --replicas <n>        Preview pods. Default 1, maximum 10.
+    -c, --container <name>    Which container's image to swap. Only needed when
+                              the pod has several and none is named after the
+                              workload.
+        --source-service <s>  The live Service whose ports are copied.
+                              Defaults to the workload name.
+        --preview-service <s> Instead of -i: route to a Service you deployed
+                              yourself. Mutually exclusive with --image.
+
+  FLAGS everywhere
+        --service-namespace <ns>  Where agentic-preview itself runs.
+                                  Default $SERVICE_NS, or \$AGENTIC_PREVIEW_NAMESPACE.
+        --service <name>          Its Service name.
+                                  Default $SERVICE, or \$AGENTIC_PREVIEW_SERVICE.
+    -h, --help                    This.
+
+  EXAMPLE
+    $PROG up checkout-api -n shop \\
+        -i registry.example.com/checkout-api:pr-1234 -w 1234 -p http
+    curl -H 'x-preview: 1234' https://your-ingress/checkout
+    $PROG list
+    $PROG down 1234
+
+  NOTES
+    Teardown is explicit. Nothing tears a preview down because a branch merged;
+    you may still be testing against it. A work id left untouched expires after
+    the service's PREVIEW_LIFETIME, which is a safety net, not a policy.
+
+    With no -w, the work id is taken from the image tag, which is usually the
+    branch or PR name. A digest-pinned image, an untagged one, or the tag
+    "latest" is refused rather than guessed at: pass -w.
+USAGE
+}
+
+# --- the API --------------------------------------------------------------
+#
+# One function per HTTP verb, all through the API server's service proxy. The
+# hints on failure matter more than the failure: a 404 here means the Service
+# is not where this plugin looked, which is a flag away from fixed, and nothing
+# in kubectl's own message says so.
+
+base() { printf '/api/v1/namespaces/%s/services/%s:80/proxy/previews' "$SERVICE_NS" "$SERVICE"; }
+
+# Set before a call whose 404 would mean "that work id has nothing live"
+# rather than "the Service is not there". kubectl --raw discards the API's own
+# JSON error body on a 404 and prints a generic line, so the context has to
+# come from this side.
+MISSING_HINT=
+
+explain() {
+  local err=$1
+  case $err in
+    *'could not find the requested resource'*)
+      [ -z "$MISSING_HINT" ] || { note ""; note "$MISSING_HINT"; }
+      ;;
+    *'not found'*|*'404'*|*'no endpoints available'*)
+      note ""
+      note "That reads as: no Service \"$SERVICE\" with ready endpoints in namespace \"$SERVICE_NS\"."
+      note "If agentic-preview is installed somewhere else, point at it:"
+      note "  $PROG <command> --service-namespace <ns> --service <name>"
+      note "  export AGENTIC_PREVIEW_NAMESPACE=<ns>   # to make it stick"
+      ;;
+    *orbidden*|*'cannot get'*|*'cannot create'*|*'cannot delete'*)
+      note ""
+      note "Your user may reach the cluster but not proxy to Services. That needs"
+      note "get/create/delete on the \"services/proxy\" subresource in \"$SERVICE_NS\"."
+      ;;
+    *'connection refused'*|*'no such host'*|*'Unauthorized'*|*'current server API group list'*)
+      note ""
+      note "kubectl could not reach the cluster at all. Check your context:"
+      note "  kubectl config current-context"
+      ;;
+  esac
+}
+
+ERRFILE=
+cleanup() { [ -z "$ERRFILE" ] || rm -f "$ERRFILE"; }
+trap cleanup EXIT
+
+api() { # api <get|create|delete> <path> [json-on-stdin]
+  local verb=$1 path=$2 err rc=0
+  ERRFILE=$(mktemp); err=$ERRFILE
+  case $verb in
+    get)    kubectl get    --raw "$path"      2>"$err" || rc=$? ;;
+    create) kubectl create --raw "$path" -f - 2>"$err" || rc=$? ;;
+    delete) kubectl delete --raw "$path"      2>"$err" || rc=$? ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    cat "$err" >&2
+    explain "$(cat "$err")"
+    exit "$rc"
+  fi
+  printf '\n'
+}
+
+# --- values ---------------------------------------------------------------
+
+# A work id becomes both a URL path segment and an HTTP header value, so the
+# two characters that would break those are refused here rather than sent.
+check_work_id() {
+  case $1 in
+    '')    die "a work id is required" ;;
+    */*)   die "work id \"$1\" cannot contain \"/\": it is sent as a URL path segment" ;;
+    *[[:space:][:cntrl:]]*) die "work id cannot contain whitespace: it is sent as an HTTP header value" ;;
+  esac
+}
+
+# Derive the work id from the image TAG - usually the branch or PR name, which
+# is the value somebody is going to type into a browser extension anyway.
+#
+# Deliberately strict, because a wrong guess here silently routes a header
+# nobody expects. It reads the tag only where there genuinely is one: after the
+# last colon of the last path element, so a registry port (host:5000/img) is
+# not mistaken for a tag and a digest pin is refused outright. "latest" is
+# refused too - every caller's "latest" would collide on one header.
+derive_work_id() {
+  local image=$1 last tag
+  case $image in *@*) return 1 ;; esac      # digest-pinned: nothing to read
+  last=${image##*/}
+  case $last in *:*) tag=${last##*:} ;; *) return 1 ;; esac
+  [ "$tag" != latest ] || return 1
+  tag=$(printf '%s' "$tag" | tr -c 'A-Za-z0-9._-' '-')
+  while :; do case $tag in [-.]*) tag=${tag#?} ;; *) break ;; esac; done
+  while :; do case $tag in *[-.]) tag=${tag%?} ;; *) break ;; esac; done
+  [ -n "$tag" ] || return 1
+  [ ${#tag} -le 63 ] || return 1
+  printf '%s' "$tag"
+}
+
+json_str() { # escape one value into a JSON string, quotes included
+  local s=$1
+  case $s in *[[:cntrl:]]*) die "value contains a control character: $1" ;; esac
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+# --- commands -------------------------------------------------------------
+
+cmd_up() {
+  local workload='' image='' work_id='' ns='' port='' replicas='' container=''
+  local source_service='' preview_service=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -i|--image)           image=${2:-}; [ -n "$image" ] || die "--image needs an image reference"; shift 2 ;;
+      -w|--work-id)         work_id=${2:-}; [ -n "$work_id" ] || die "--work-id needs a value"; shift 2 ;;
+      -n|--namespace)       ns=${2:-}; [ -n "$ns" ] || die "--namespace needs a namespace"; shift 2 ;;
+      -p|--port)            port=${2:-}; [ -n "$port" ] || die "--port needs a name or number"; shift 2 ;;
+      -r|--replicas)        replicas=${2:-}; [ -n "$replicas" ] || die "--replicas needs a number"; shift 2 ;;
+      -c|--container)       container=${2:-}; [ -n "$container" ] || die "--container needs a name"; shift 2 ;;
+      --source-service)     source_service=${2:-}; [ -n "$source_service" ] || die "--source-service needs a name"; shift 2 ;;
+      --preview-service)    preview_service=${2:-}; [ -n "$preview_service" ] || die "--preview-service needs a name"; shift 2 ;;
+      -*)                   die "unknown flag for up: $1. Try: $PROG --help" ;;
+      *)                    [ -z "$workload" ] || die "up takes one workload, got \"$workload\" and \"$1\""
+                            workload=$1; shift ;;
+    esac
+  done
+
+  [ -n "$workload" ] || die "up needs the name of the live workload to preview. Try: $PROG --help"
+  [ -n "$ns" ] || die "up needs --namespace: the namespace \"$workload\" lives in, and one of the service's ALLOWED_NAMESPACES"
+  if [ -n "$image" ] && [ -n "$preview_service" ]; then
+    die "--image and --preview-service are mutually exclusive: one builds a preview, the other routes to one you built"
+  fi
+  if [ -z "$image" ] && [ -z "$preview_service" ]; then
+    die "up needs --image, the image to run. It is used verbatim; agentic-preview does not build it.
+     (Or --preview-service, to route to a Service you deployed yourself.)"
+  fi
+  case ${replicas:-1} in
+    *[!0-9]*) die "--replicas takes a whole number" ;;
+  esac
+
+  if [ -z "$work_id" ]; then
+    [ -n "$image" ] || die "--work-id is required with --preview-service: there is no image tag to take it from"
+    work_id=$(derive_work_id "$image") || die "could not take a work id from \"$image\".
+     A digest-pinned image, an untagged one, or the tag \"latest\" is refused
+     rather than guessed at. Pass one:  -w <work-id>"
+    note "work id taken from the image tag: $work_id"
+  fi
+  check_work_id "$work_id"
+
+  local body="{\"workId\":$(json_str "$work_id"),\"workload\":$(json_str "$workload"),\"namespace\":$(json_str "$ns")"
+  [ -z "$image" ]           || body="$body,\"image\":$(json_str "$image")"
+  [ -z "$preview_service" ] || body="$body,\"previewService\":$(json_str "$preview_service")"
+  [ -z "$port" ]            || body="$body,\"port\":$(json_str "$port")"
+  [ -z "$container" ]       || body="$body,\"container\":$(json_str "$container")"
+  [ -z "$source_service" ]  || body="$body,\"sourceService\":$(json_str "$source_service")"
+  [ -z "$replicas" ]        || body="$body,\"replicas\":$replicas"
+  body="$body}"
+
+  local out header
+  out=$(printf '%s' "$body" | api create "$(base)")
+  printf '%s\n' "$out"
+
+  # The header NAME is the service's own configuration, not this plugin's, so
+  # it is read back out of the response rather than assumed to be x-preview.
+  header=$(printf '%s' "$out" | sed -n 's/.*"header": *"\([^"]*\)".*/\1/p' | head -1)
+  if [ -n "$header" ]; then
+    note "Send this header to your normal ingress and you reach the preview:"
+    note "  $header"
+  fi
+  note "Requests without it are untouched. When you are done:  $PROG down $work_id"
+}
+
+cmd_list() {
+  [ $# -le 1 ] || die "list takes at most one work id, got $#"
+  if [ $# -eq 1 ]; then
+    check_work_id "$1"
+    MISSING_HINT="Work id \"$1\" has nothing live. \"$PROG list\" shows the ones that do."
+    api get "$(base)/$1"
+  else
+    api get "$(base)"
+  fi
+}
+
+cmd_down() {
+  local work_id='' workload='' ns=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -n|--namespace) ns=${2:-}; [ -n "$ns" ] || die "--namespace needs a namespace"; shift 2 ;;
+      -*)             die "unknown flag for down: $1. Try: $PROG --help" ;;
+      *)              if   [ -z "$work_id" ];  then work_id=$1
+                      elif [ -z "$workload" ]; then workload=$1
+                      else die "down takes a work id and at most one workload"
+                      fi; shift ;;
+    esac
+  done
+  check_work_id "$work_id"
+
+  if [ -z "$workload" ]; then
+    [ -z "$ns" ] || die "--namespace only means something with a workload: \"down $work_id\" already drops every namespace the work id spans"
+    MISSING_HINT="Work id \"$work_id\" already has nothing live, which is the right answer to a teardown that ran twice."
+    api delete "$(base)/$work_id"
+  else
+    [ -n "$ns" ] || die "dropping one workload needs --namespace, so the right one of \"$work_id\"'s workloads goes"
+    MISSING_HINT="Work id \"$work_id\" is not previewing $workload.$ns. \"$PROG list $work_id\" shows what it is previewing."
+    api delete "$(base)/$work_id/$ns/$workload"
+  fi
+}
+
+cmd_status() {
+  [ $# -eq 0 ] || die "status takes no arguments"
+  api get "/api/v1/namespaces/$SERVICE_NS/services/$SERVICE:80/proxy/readyz"
+}
+
+# --- dispatch -------------------------------------------------------------
+
+command -v kubectl >/dev/null 2>&1 || die "kubectl is not on PATH, and this plugin is a wrapper around it"
+
+# Pull the two service-location flags out wherever they appear, so they can sit
+# after the subcommand the way every other flag here does.
+args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --service-namespace) SERVICE_NS=${2:-}; [ -n "$SERVICE_NS" ] || die "--service-namespace needs a namespace"; shift 2 ;;
+    --service)           SERVICE=${2:-}; [ -n "$SERVICE" ] || die "--service needs a name"; shift 2 ;;
+    -h|--help|help)      usage; exit 0 ;;
+    *)                   args+=("$1"); shift ;;
+  esac
+done
+set -- ${args+"${args[@]}"}
+
+case ${1:-} in
+  up)             shift; cmd_up "$@" ;;
+  list|ls)        shift; cmd_list "$@" ;;
+  down|drop)      shift; cmd_down "$@" ;;
+  status)         shift; cmd_status "$@" ;;
+  '')             usage; exit 0 ;;
+  *)              die "unknown command: $1. There are four: up, list, down, status. Try: $PROG --help" ;;
+esac

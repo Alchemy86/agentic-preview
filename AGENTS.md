@@ -39,6 +39,14 @@ request. The measured numbers and failure modes are in
   it an image reference and it runs that reference verbatim; teardown is explicit. If a
   change wants to infer something from a tag or a merge, that is the line.
   [`docs/NON-GOALS.md`](docs/NON-GOALS.md) is the authority.
+- **`hack/kubectl-agentic_preview` is a client of the HTTP API and must stay in step with
+  it.** It is the `kubectl agentic-preview` plugin (kubectl maps the underscore to a
+  space), a shell wrapper over `kubectl … --raw` against the API server's service proxy —
+  no Go client, no credentials of its own. It currently covers all five endpoints. Adding
+  an endpoint to `api.go` means adding a subcommand or deciding in the open not to; the
+  same goes for a new field on `PreviewRequest` and a flag on `up`.
+  [`docs/PLUGIN.md`](docs/PLUGIN.md) is the page, and `--help` is the command reference —
+  do not duplicate one into the other.
 - **README.md is the front page, not the manual.** It keeps the pitch, the feature map,
   install, the API table, and the short forms of the non-goals and the limits — everything
   else lives as a page under `docs/`, indexed by [`docs/README.md`](docs/README.md). Detail

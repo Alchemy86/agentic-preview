@@ -11,13 +11,24 @@ manifests in `deploy/` create:
 export AGENTIC_PREVIEW_URL=http://agentic-preview.agentic-preview.svc.cluster.local
 ```
 
-Running them from outside the cluster? The Service is deliberately ClusterIP-only, so
-port-forward to it first:
+Running them from outside the cluster? The Service is deliberately ClusterIP-only. You do
+not need a tunnel for that — the API server will proxy to it:
 
 ```bash
-kubectl -n agentic-preview port-forward svc/agentic-preview 8080:80
-export AGENTIC_PREVIEW_URL=http://localhost:8080
+kubectl get --raw "/api/v1/namespaces/agentic-preview/services/agentic-preview:80/proxy/previews"
 ```
+
+`kubectl proxy` in one terminal turns that into an address these scripts can use:
+
+```bash
+kubectl proxy &   # serves the whole API on :8001
+export AGENTIC_PREVIEW_URL=http://localhost:8001/api/v1/namespaces/agentic-preview/services/agentic-preview:80/proxy
+```
+
+For anything interactive, though, reach for
+[`kubectl agentic-preview`](../hack/kubectl-agentic_preview) instead — same API, same
+proxy, no URL to assemble. These scripts are here for the pipeline step, which is going to
+be a `curl` from inside the cluster anyway.
 
 | Script | What it does |
 | :--- | :--- |

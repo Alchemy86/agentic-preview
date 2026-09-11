@@ -152,8 +152,15 @@ raise something:
 
 ```bash
 kubectl -n agentic-preview rollout status deploy/agentic-preview
-kubectl -n agentic-preview port-forward svc/agentic-preview 8080:80
-curl -sS localhost:8080/readyz
+kubectl agentic-preview status
+```
+
+The Service is ClusterIP-only and deliberately has no Ingress, but you do not need a tunnel
+to read it: the API server will proxy to it for you, which is all
+[the plugin](../hack/kubectl-agentic_preview) is doing.
+
+```bash
+kubectl get --raw "/api/v1/namespaces/agentic-preview/services/agentic-preview:80/proxy/readyz"
 ```
 
 ## Running it where deny-all NetworkPolicies apply
