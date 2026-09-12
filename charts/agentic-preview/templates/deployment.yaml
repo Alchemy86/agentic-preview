@@ -30,9 +30,20 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations .Values.schedules }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.schedules }}
+        # Rolls the pod when a schedule changes. The schedule file is read once
+        # at startup and never reloaded - deliberately, so that a window opening
+        # at 18:32 was proved parseable at 09:00 - which without this means an
+        # edited ConfigMap silently does nothing until something else restarts
+        # the pod. The restart is also when the new schedule is re-validated, so
+        # a bad edit fails where somebody is looking.
+        checksum/schedules: {{ include (print $.Template.BasePath "/schedules.yaml") . | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "agentic-preview.serviceAccountName" . }}
@@ -73,6 +84,19 @@ spec:
               value: {{ include "agentic-preview.previewLifetime" . | quote }}
             - name: PREVIEW_READY_TIMEOUT
               value: {{ .Values.preview.readyTimeout | quote }}
+            {{- if .Values.schedules }}
+            # Scheduled, HEADERLESS intercepts. Declared in config rather than
+            # raised over the API because a global intercept takes every request
+            # to a workload, not one header's worth, so it is a thing to review
+            # in a repository and not a thing to be able to ask for over HTTP.
+            - name: SCHEDULE_FILE
+              value: /etc/agentic-preview/schedules.yaml
+            # Both how promptly a window opens or closes AND how quickly a
+            # scheduled intercept that has died is noticed - see the note in
+            # values.yaml for why the second of those is the reason it is short.
+            - name: SCHEDULE_CHECK_INTERVAL
+              value: {{ .Values.scheduleCheckInterval | quote }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -97,6 +121,11 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /var/lib/agentic-preview
+            {{- if .Values.schedules }}
+            - name: schedules
+              mountPath: /etc/agentic-preview
+              readOnly: true
+            {{- end }}
       volumes:
         # Records the current session id so a restarted container can depart
         # its predecessor's session and release what it held. An emptyDir
@@ -105,6 +134,15 @@ spec:
         # actually matters.
         - name: state
           emptyDir: {}
+        {{- if .Values.schedules }}
+        # Read once at startup and never reloaded: a window that opens at 18:32
+        # has to have been proved parseable at 09:00, not discovered to be
+        # unparseable at 18:32. Editing the ConfigMap therefore needs a restart,
+        # which is also the moment the schedule is re-validated.
+        - name: schedules
+          configMap:
+            name: {{ include "agentic-preview.fullname" . }}-schedules
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

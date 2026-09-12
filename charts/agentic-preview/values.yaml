@@ -79,6 +79,75 @@ preview:
   # and obvious ten seconds later. `0` skips the wait.
   readyTimeout: 120s
 
+# Scheduled, HEADERLESS intercepts. Empty - the default - means there are none
+# and nothing about this mode is rendered or reached.
+#
+# A schedule gives ONE workload a recurring window. While the window is open
+# agentic-preview raises a GLOBAL intercept on it: no header filter at all, so
+# every connection to that port is diverted to targetService, whatever it
+# carries and whether it is TLS or plaintext. When the window closes the
+# intercept is removed and the workload serves its own traffic again. Nothing
+# has to call /previews for this; nothing has to be awake.
+#
+# Three things to know before declaring one, because they are not obvious:
+#
+#   * A WORKLOAD RUNS IN ONE INTERCEPT MODE AT A TIME. Telepresence's
+#     traffic-agent switches the whole port to HTTP mode as soon as any
+#     header-filtered intercept is live on it, and a headerless intercept then
+#     matches nothing while still reporting itself healthy. agentic-preview
+#     refuses both directions loudly rather than letting that happen - so do not
+#     put a workload people raise previews against on a schedule.
+#
+#   * IT IS ALL OF THAT WORKLOAD'S TRAFFIC. A header-keyed preview affects one
+#     header; this affects everything reaching the port. If agentic-preview dies
+#     un-gracefully while a window is open, that traffic is held rather than
+#     failing over until the replacement pod departs the dead session (seconds)
+#     - see the limits page.
+#
+#   * ALLOWED NAMESPACES BOUND IT, in both directions, exactly as they bound a
+#     preview. The chart refuses to render a schedule outside the list.
+#
+#   schedules:
+#     - name: offhours              # the id it is reported under; reserved as a work id
+#       workload: checkout-api
+#       namespace: shop
+#       port: "8443"                # port identifier on the workload, default 80
+#       # service: checkout-tls     # only when the workload has two Services on the port
+#       targetService: auth-stub    # or auth-stub.previews
+#       targetPort: 8443
+#       windows:
+#         # An overnight reads naturally as an end time; end <= start is the
+#         # next day, so this is 18:32 through to 07:21.
+#         - days: [Mon, Tue, Wed, Thu]
+#           start: "18:32"
+#           end:   "07:21"
+#         # Anything longer than a day needs a duration instead: Friday evening
+#         # straight through to Monday morning is one window, not three.
+#         - days: [Fri]
+#           start: "18:32"
+#           duration: 60h49m
+schedules: []
+
+# Changing any of the three settings below rolls the pod: the file is read once
+# at startup on purpose, so a change has to restart something to take effect.
+#
+# The IANA time zone every window is read in unless it names its own with
+# `location`. Left empty this is UTC, which is stated rather than guessed: a
+# window written in local time and read in UTC is silently an hour wrong for
+# half the year, which is the worst way for this to fail.
+scheduleDefaultLocation: ""
+
+# How often the schedule controller reconciles. This is BOTH how promptly a
+# window opens or closes AND how quickly a scheduled intercept that has died is
+# noticed and re-raised.
+#
+# It is short because of the second of those. A dead global intercept does not
+# fail open: it holds every request to the workload, and nobody is awake at
+# 03:00 to notice. The service's other safety nets are hours (preview.lifetime)
+# or demand-driven, so this interval is the real bound on that exposure. Raising
+# it saves one gRPC call per schedule per tick and trades traffic held for it.
+scheduleCheckInterval: 30s
+
 service:
   # ClusterIP only, and there is no ingress in this chart on purpose: anything
   # that can reach this service can raise an intercept on any workload in

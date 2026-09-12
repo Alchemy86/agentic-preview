@@ -22,6 +22,13 @@ tells you whether the boundary is in the right place.
 - **It does not build or push images.** Your CI already does.
 - **It does not manage DNS, ingress or certificates.** Traffic arrives through the ingress
   you already have; the header is the only thing that changes.
+- **It does not let a caller ask for a global, headerless intercept.** That mode exists — see
+  [Scheduled, headerless intercepts](SCHEDULES.md) — but only from a window declared in the
+  service's own config, never from the API, and there is no `global` field on
+  `PreviewRequest`. A filterless intercept diverts every request to a workload, so it is a
+  thing to review in a repository rather than a thing anything that can reach the ClusterIP
+  may raise. The schedule controller is also the only thing entitled to end one: a `DELETE`
+  of a schedule's name is refused.
 - **It does not accept a per-request header name.** `HEADER_NAME` is service-level
   configuration. Two services of one work id behind different header names would destroy
   the one guarantee a work id exists for.

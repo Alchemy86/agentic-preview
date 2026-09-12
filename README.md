@@ -96,6 +96,7 @@ flowchart TB
         R2["Many services per id,<br/>joined as each PR builds"]
         R3["Header name is service<br/>config, not per-request"]
         R4["Two work ids, one<br/>workload, at once"]
+        R5["Or a declared window:<br/>whole workload, no header"]
     end
 
     subgraph D["Durability"]
@@ -244,6 +245,8 @@ GET    /previews                                  every work id, what it spans, 
 GET    /previews/{workId}                         one work id's service set
 DELETE /previews/{workId}/{namespace}/{workload}  remove one service of a work id
 DELETE /previews/{workId}                         remove a whole work id
+GET    /schedules                                 declared scheduled intercepts and
+                                                  their state (read-only)
 GET    /healthz                                   liveness
 GET    /readyz                                    ready only once a session exists
 ```
@@ -332,6 +335,11 @@ cluster.
   against it is worse than a forgotten pod.
 - **If you expire preview images, exclude the ones in use.** `GET /previews` reports the
   image each preview runs precisely so a retention policy can skip them.
+- **A [scheduled intercept](docs/SCHEDULES.md) cannot share a workload with a preview**, and
+  a scheduled intercept that dies takes *all* of that workload's traffic with it rather than
+  one header's worth. Both are refusals rather than surprises — both directions of the clash
+  are refused loudly, and an open window's intercept is re-checked against the manager every
+  30s. That mode is off unless you declare a window.
 
 Each of these in full, with the code-level evidence: **[docs/LIMITS.md](docs/LIMITS.md)**.
 

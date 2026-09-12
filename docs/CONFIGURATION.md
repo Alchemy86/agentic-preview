@@ -19,12 +19,19 @@ set. With Helm, the values that map onto these are in
 | `PREVIEW_LIFETIME` | `24h` | How long a preview lives untouched before it is swept. Any contact with a work id extends every preview in it. `off`, `never` or `0` disables expiry — do that when something else is responsible for cleaning up. |
 | `PREVIEW_REAP_INTERVAL` | `1m` | How often expired previews are swept. |
 | `PREVIEW_READY_TIMEOUT` | `120s` | How long a create waits for the preview's pods before failing the `POST` with the reason. `0` skips the wait. |
+| `SCHEDULE_FILE` | unset | A file declaring [scheduled, headerless intercepts](SCHEDULES.md). Unset — the normal case — means there are none and nothing about that mode is reached. Read once at startup; anything wrong in it is fatal there rather than at 18:32. |
+| `SCHEDULE_CHECK_INTERVAL` | `30s` | How often a schedule is reconciled: both how promptly a window opens or closes, and how quickly a scheduled intercept that has died is noticed and re-raised. |
 
 Two of these carry more weight than the rest, and each has its own note:
 
 - **`ALLOWED_NAMESPACES`** is the only fence on the forward target. It is required, with no
   default, because an empty list read as "everything" is the wrong failure. See
   [Limits](LIMITS.md#allowed_namespaces-is-the-only-fence-on-the-forward-target).
+- **`SCHEDULE_FILE`** switches on the only mode here that is not header-keyed, and the only
+  one that diverts *all* of a workload's traffic. Its page is
+  [Scheduled, headerless intercepts](SCHEDULES.md); read the two-modes section of it before
+  declaring a window, because the constraint it describes decides whether the mode is usable
+  for a given service at all.
 - **`PREVIEW_LIFETIME`** is a safety net, not a policy. If something else is responsible
   for cleaning previews up, turn it off. See
   [Limits](LIMITS.md#there-is-a-timer-against-forgotten-previews-and-you-may-well-want-it-off).

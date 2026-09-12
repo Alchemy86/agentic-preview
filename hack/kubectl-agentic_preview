@@ -59,6 +59,14 @@ $PROG - header-routed preview environments, from the command line.
         The manager session, the allowed-namespace list, and one entry per live
         tunnel. This is /readyz; read it when a preview is up but not routing.
 
+    schedules
+        Scheduled, HEADERLESS intercepts: every window declared in the
+        service's config, whether it is open, whether its intercept is up, and
+        the problem if it is open and is not. Read-only - a window is declared
+        in config, never raised from here, because it diverts ALL of a
+        workload's traffic and not one header's worth. Empty output means
+        nothing is scheduled, which is the normal case.
+
   FLAGS for up
     -n, --namespace <ns>      Namespace of the workload being previewed.
                               Required: it has no safe default, and it must be
@@ -110,7 +118,8 @@ USAGE
 # is not where this plugin looked, which is a flag away from fixed, and nothing
 # in kubectl's own message says so.
 
-base() { printf '/api/v1/namespaces/%s/services/%s:80/proxy/previews' "$SERVICE_NS" "$SERVICE"; }
+proxy() { printf '/api/v1/namespaces/%s/services/%s:80/proxy' "$SERVICE_NS" "$SERVICE"; }
+base()  { printf '%s/previews' "$(proxy)"; }
 
 # Set before a call whose 404 would mean "that work id has nothing live"
 # rather than "the Service is not there". kubectl --raw discards the API's own
@@ -310,7 +319,12 @@ cmd_down() {
 
 cmd_status() {
   [ $# -eq 0 ] || die "status takes no arguments"
-  api get "/api/v1/namespaces/$SERVICE_NS/services/$SERVICE:80/proxy/readyz"
+  api get "$(proxy)/readyz"
+}
+
+cmd_schedules() {
+  [ $# -eq 0 ] || die "schedules takes no arguments: a window is declared in the service's SCHEDULE_FILE, not asked for here"
+  api get "$(proxy)/schedules"
 }
 
 # --- dispatch -------------------------------------------------------------
@@ -335,6 +349,7 @@ case ${1:-} in
   list|ls)        shift; cmd_list "$@" ;;
   down|drop)      shift; cmd_down "$@" ;;
   status)         shift; cmd_status "$@" ;;
+  schedules|sched) shift; cmd_schedules "$@" ;;
   '')             usage; exit 0 ;;
-  *)              die "unknown command: $1. There are four: up, list, down, status. Try: $PROG --help" ;;
+  *)              die "unknown command: $1. There are five: up, list, down, status, schedules. Try: $PROG --help" ;;
 esac

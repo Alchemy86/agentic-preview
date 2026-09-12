@@ -14,6 +14,8 @@
 | `session.go` | Manager session: arrive, remain, credential, reconnect, raise/remove, orphan sweep |
 | `agents.go` | One tunnel per node-agent pod, rebuilt as the agent pod set changes |
 | `api.go` | The HTTP API |
+| `schedule.go` | Scheduled headerless intercepts: the config schema, window arithmetic, and the header comment stating why the two intercept modes cannot share a workload |
+| `schedule_controller.go` | The one loop that opens and closes windows and health-checks its own live intercepts |
 | `deploy/` | Deployment, Service, ServiceAccount, RBAC, kustomization — four placeholders |
 | `charts/` | The Helm chart, a realistic values file, and the Artifact Hub repository metadata |
 | `examples/` | Raise (built or your own), list, drop one, drop all — runnable `curl` |

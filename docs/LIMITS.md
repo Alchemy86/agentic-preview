@@ -24,6 +24,15 @@ is affected. No other traffic is touched, and nobody gets a wrong answer. The ne
 for that service clears it — the manager's conflict error names the dead session, and
 agentic-preview departs it and retries once, releasing everything that session held.
 
+**A SCHEDULED intercept is the exception to "the damage is narrow", and it is the reason
+[scheduled intercepts](SCHEDULES.md) have a health check of their own.** A global intercept
+carries no header filter, so "that specific header value" is all of the workload's traffic,
+and a window is open precisely when nobody is watching. The controller therefore re-checks
+its own intercept against the manager every `SCHEDULE_CHECK_INTERVAL` (30s) rather than
+relying on either safety net above — measured recovery from a `kill -9` was 1.6s and from a
+force-deleted pod 11s, neither of which hung. The numbers and the three cases are on
+[that page](SCHEDULES.md#measured).
+
 ## There is a window during a target-pod rollout
 
 When the workload you are previewing rolls, the manager reaps the old node-agent Job and

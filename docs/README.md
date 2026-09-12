@@ -8,6 +8,7 @@ the boundaries. This is where the detail lives.
 | [Design and measured behaviour](DESIGN.md) | The one design fact the whole service is built on, the mechanism of an intercepted request, the API in full, authentication and RBAC, cleanup, and every measured number |
 | [Installing agentic-preview](INSTALL.md) | Both install paths in full — the traffic-manager prerequisite, digest pinning, the four placeholders in `deploy/`, and how to check it came up |
 | [The `kubectl` plugin](PLUGIN.md) | Getting `kubectl agentic-preview` onto your PATH, how it reaches a ClusterIP-only Service without a tunnel, the one permission it needs, and how it picks a work id |
+| [Scheduled, headerless intercepts](SCHEDULES.md) | The one mode that is not header-keyed: a declared window, a whole workload diverted for its duration, why the two modes cannot share a workload, and what a global intercept costs when it dies |
 | [Configuration](CONFIGURATION.md) | Every environment variable, its default and what it is for |
 | [A worked example, end to end](WORKED-EXAMPLE.md) | Six steps from pull request to teardown, and which two of them are this tool |
 | [What it deliberately does not do](NON-GOALS.md) | Each boundary stated in full, and why it is where it is |

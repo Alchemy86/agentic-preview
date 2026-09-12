@@ -27,6 +27,11 @@
 #   4. `agentic-preview` namespace -> where the service itself runs. Change it in
 #                                   namespace.yaml and in the `namespace:` field
 #                                   of every other file if you want it elsewhere.
+#
+# schedules.yaml is the one file here that is NOT applied. It is the optional
+# scheduled-intercept mode, off unless you add it to `resources` below and
+# uncomment the three blocks in deployment.yaml that it names. Its own header
+# explains what the mode does and what it costs.
 # ---------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

@@ -81,6 +81,28 @@ type config struct {
 	// even without a new snapshot, so a dial loop that ended on its own is
 	// re-established. The manager's own node-agent resync is 30s.
 	agentReconcile time.Duration
+
+	// schedulePath is the file declaring scheduled, headerless intercepts.
+	// Unset - which is the normal case - means there are none and nothing in
+	// schedule.go is reached.
+	schedulePath string
+
+	// schedules are the compiled contents of schedulePath. Compiled at startup
+	// and never reloaded: a window that opens at 18:32 must have been proved
+	// parseable at 09:00, not discovered to be unparseable at 18:32.
+	schedules []*schedule
+
+	// scheduleCheckInterval is how often the schedule controller reconciles,
+	// which is BOTH how promptly a window opens or closes and how quickly a
+	// scheduled intercept that has died is noticed.
+	//
+	// It is 30s rather than minutes because of what a dead GLOBAL intercept
+	// costs: not one header hanging, but every request to the workload, with
+	// nobody awake to notice. The existing safety nets are hours (PREVIEW_
+	// LIFETIME) or demand-driven (the conflict orphan sweep), so this interval
+	// is the real bound on that exposure. Raising it trades traffic held for
+	// gRPC calls saved; the calls are one GetIntercept per schedule.
+	scheduleCheckInterval time.Duration
 }
 
 func loadConfig() (*config, error) {
@@ -97,6 +119,9 @@ func loadConfig() (*config, error) {
 		readyTimeout:     envDuration("PREVIEW_READY_TIMEOUT", 120*time.Second),
 		lifetime:         envLifetime("PREVIEW_LIFETIME", 24*time.Hour),
 		reapInterval:     envDuration("PREVIEW_REAP_INTERVAL", time.Minute),
+
+		schedulePath:          strings.TrimSpace(os.Getenv("SCHEDULE_FILE")),
+		scheduleCheckInterval: envDuration("SCHEDULE_CHECK_INTERVAL", 30*time.Second),
 	}
 
 	if c.managerAddr == "" {
@@ -112,7 +137,35 @@ func loadConfig() (*config, error) {
 	if len(c.allowedNamespaces) == 0 {
 		return nil, fmt.Errorf("ALLOWED_NAMESPACES is required and must list at least one namespace")
 	}
+
+	// Schedules are compiled last because compiling one checks its namespaces
+	// against the allow-list above, and FATALLY because the alternative is a
+	// window that silently never opens. Nobody is watching a 03:00 window; a
+	// pod that will not start is noticed, and a schedule that quietly did not
+	// load is not.
+	if c.schedulePath != "" {
+		scheds, err := loadSchedules(c.schedulePath, c)
+		if err != nil {
+			return nil, err
+		}
+		c.schedules = scheds
+	}
+
+	if c.scheduleCheckInterval <= 0 {
+		return nil, fmt.Errorf("SCHEDULE_CHECK_INTERVAL must be positive")
+	}
 	return c, nil
+}
+
+// scheduledNames is the set of work ids reserved by schedules. A POST /previews
+// may not use one: it would land on the same registry key as the schedule's own
+// entry and the two would take turns removing each other.
+func (c *config) scheduledNames() map[string]bool {
+	out := make(map[string]bool, len(c.schedules))
+	for _, s := range c.schedules {
+		out[s.spec.Name] = true
+	}
+	return out
 }
 
 // namespaceAllowed reports whether ns is one agentic-preview may intercept in.

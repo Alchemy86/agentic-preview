@@ -108,9 +108,33 @@ type Preview struct {
 	// work id so that two work ids previewing the same service coexist.
 	Name string `json:"name"`
 
-	HeaderName  string `json:"headerName"`
-	HeaderValue string `json:"headerValue"`
+	HeaderName  string `json:"headerName,omitempty"`
+	HeaderValue string `json:"headerValue,omitempty"`
 	PortID      string `json:"port"`
+
+	// Global makes this a HEADERLESS, whole-workload intercept: the spec goes
+	// to the manager with no HeaderFilters at all, so the traffic-agent keeps
+	// the port on its raw TCP listener and diverts every connection to it
+	// rather than only those carrying a header. See the header comment on
+	// schedule.go, which is where the consequences are written down - chiefly
+	// that a workload runs in ONE mode at a time and the two silently exclude
+	// each other, and that an orphaned global intercept hangs everything rather
+	// than one header's worth.
+	//
+	// Nothing in the HTTP API sets it. It is set only by a declared schedule,
+	// so a service with no window is untouched by every line it reaches.
+	Global bool `json:"global,omitempty"`
+
+	// Schedule is the name of the schedule that owns this intercept, empty for
+	// every preview raised through /previews. It is what makes a scheduled
+	// intercept immune to the expiry sweep and to a DELETE: its lifetime is the
+	// window, and the controller is the only thing entitled to end it.
+	Schedule string `json:"schedule,omitempty"`
+
+	// ServiceName pins which Service is intercepted, for a workload carrying
+	// more than one on the port. Left empty the manager resolves it, and
+	// refuses when the choice is ambiguous.
+	ServiceName string `json:"serviceName,omitempty"`
 
 	TargetService string `json:"previewService"`
 	TargetHost    string `json:"targetHost"`
@@ -166,6 +190,22 @@ func (p *Preview) key() serviceKey { return serviceKey{p.WorkID, p.Namespace, p.
 // agentKey is the identity a dial loop is kept under: one tunnel per agent pod
 // per session, shared by every preview of that workload whatever its work id.
 func (p *Preview) agentKey() string { return p.Workload + "." + p.Namespace }
+
+// headerFilters is the InterceptSpec field that decides the whole mechanism.
+//
+// A nil return is what makes an intercept GLOBAL: the traffic-agent's test is
+// len(spec.HeaderFilters) > 0 || len(spec.PathFilters) > 0
+// (cmd/traffic/cmd/agent/fwd/interceptcontroller.go), and with neither the
+// port's listener switch stays on the raw TCP side and the whole connection is
+// io.Copy'd to us without a byte being parsed. A header filter whose VALUE is
+// empty is not the same thing - that is still HTTP mode, matching a header that
+// is present and blank - so this returns nil rather than an empty value.
+func (p *Preview) headerFilters() map[string]string {
+	if p.Global {
+		return nil
+	}
+	return map[string]string{p.HeaderName: p.HeaderValue}
+}
 
 // Work is one work id's whole set, as the list API reports it, so a person can
 // see that their change spans checkout and pricing and nothing else.
@@ -443,6 +483,32 @@ func (r *registry) add(p *Preview) error {
 	return nil
 }
 
+// conflictingMode returns a live intercept on the same workload running in the
+// OTHER mode, or nil.
+//
+// This is the check that stops the two features fighting over one target, and it
+// exists because the failure it prevents is SILENT. "Has filters" is a
+// per-workload switch in the traffic-agent, not a per-intercept one: one
+// header-filtered intercept puts the port into HTTP mode, where the matcher has
+// a header tier and a path tier and a filterless intercept qualifies for
+// neither - so it is never selected, traffic goes to the real application, and
+// the manager still reports it ACTIVE. In the other direction a live global
+// intercept is the one the raw listener serves and a header-keyed one raised
+// alongside it is equally inert. Either way nothing errors and nothing logs.
+//
+// So the refusal is made here, loudly, at the point where both are known.
+func (r *registry) conflictingMode(p *Preview) *Preview {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for k, ex := range r.byKey {
+		if k == p.key() || ex.agentKey() != p.agentKey() || ex.Global == p.Global {
+			continue
+		}
+		return ex
+	}
+	return nil
+}
+
 func (r *registry) get(k serviceKey) (*Preview, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -487,7 +553,11 @@ func (r *registry) works() []Work {
 			c.Age = now.Sub(c.RaisedAt).Round(time.Second).String()
 		}
 		byID[c.WorkID] = append(byID[c.WorkID], c)
-		header[c.WorkID] = c.HeaderName + ": " + c.HeaderValue
+		if c.Global {
+			header[c.WorkID] = "(none: global intercept, all traffic to the port)"
+		} else {
+			header[c.WorkID] = c.HeaderName + ": " + c.HeaderValue
+		}
 	}
 	out := make([]Work, 0, len(byID))
 	for id, svcs := range byID {
@@ -554,7 +624,11 @@ func (r *registry) touch(workID string, until time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, p := range r.byKey {
-		if p.WorkID == workID {
+		// A scheduled intercept's life is its window and nothing else. Giving
+		// it an expiry would hand the reap sweep a second opinion about when it
+		// ends, and the two would disagree the moment a window ran past
+		// PREVIEW_LIFETIME - which an overnight-plus-weekend window does.
+		if p.WorkID == workID && p.Schedule == "" {
 			p.ExpiresAt = until
 		}
 	}

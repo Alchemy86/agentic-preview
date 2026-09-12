@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -150,3 +151,6 @@ func TestMissingManagerAddrIsRefused(t *testing.T) {
 		t.Fatalf("want a refusal naming ALLOWED_NAMESPACES, got %v", err)
 	}
 }
+
+// writeFile is a test helper shared with schedule_test.go.
+func writeFile(path, body string) error { return os.WriteFile(path, []byte(body), 0o600) }

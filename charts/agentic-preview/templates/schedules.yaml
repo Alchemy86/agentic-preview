@@ -1,0 +1,45 @@
+{{- if .Values.schedules }}
+{{- /*
+  Scheduled, headerless intercepts.
+
+  Rendered ONLY when schedules are declared, so an install that does not use
+  them gets no ConfigMap, no volume and no SCHEDULE_FILE, and the controller in
+  the service returns immediately.
+
+  A schedule's namespaces are checked here as well as in the service because a
+  render-time failure is readable and a startup failure is a CrashLoopBackOff
+  somebody has to go and read logs for. Both ends check the same boundary:
+  allowedNamespaces bounds where a schedule may intercept AND where it may
+  divert traffic to, exactly as it does for a preview.
+*/}}
+{{- $allowed := include "agentic-preview.allowedNamespaces" . | fromYamlArray }}
+{{- range $i, $s := .Values.schedules }}
+  {{- if not $s.name }}{{ fail (printf "schedules[%d]: name is required" $i) }}{{ end }}
+  {{- if not $s.workload }}{{ fail (printf "schedules[%d] (%s): workload is required" $i $s.name) }}{{ end }}
+  {{- if not $s.namespace }}{{ fail (printf "schedules[%d] (%s): namespace is required" $i $s.name) }}{{ end }}
+  {{- if not $s.targetService }}{{ fail (printf "schedules[%d] (%s): targetService is required - the Service traffic is diverted to while the window is open" $i $s.name) }}{{ end }}
+  {{- if not $s.windows }}{{ fail (printf "schedules[%d] (%s): at least one window is required" $i $s.name) }}{{ end }}
+  {{- if not (has $s.namespace $allowed) }}
+    {{- fail (printf "schedules[%d] (%s): namespace %q is not in allowedNamespaces (%s). A schedule may only intercept where a preview may" $i $s.name $s.namespace (join ", " $allowed)) }}
+  {{- end }}
+  {{- $targetNS := $s.namespace }}
+  {{- if $s.targetNamespace }}{{ $targetNS = $s.targetNamespace }}{{ else if contains "." $s.targetService }}{{ $targetNS = index (splitList "." $s.targetService) 1 }}{{ end }}
+  {{- if not (has $targetNS $allowed) }}
+    {{- fail (printf "schedules[%d] (%s): forward-target namespace %q is not in allowedNamespaces (%s). This is the namespace of targetService, what traffic is diverted TO" $i $s.name $targetNS (join ", " $allowed)) }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentic-preview.fullname" . }}-schedules
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentic-preview.labels" . | nindent 4 }}
+data:
+  schedules.yaml: |
+    {{- if .Values.scheduleDefaultLocation }}
+    defaultLocation: {{ .Values.scheduleDefaultLocation | quote }}
+    {{- end }}
+    schedules:
+    {{- toYaml .Values.schedules | nindent 6 }}
+{{- end }}

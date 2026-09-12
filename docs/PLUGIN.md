@@ -107,6 +107,11 @@ it: `workId` is required there, and is never parsed by the service.
 
 ## Staying in step
 
-The plugin covers the whole API surface — five endpoints across `up`, `list`, `down` and
-`status`. A new endpoint is a new subcommand, or a decided and stated reason not to add
-one; see [`AGENTS.md`](../AGENTS.md).
+The plugin covers the whole API surface — six endpoints across `up`, `list`, `down`,
+`status` and `schedules`. A new endpoint is a new subcommand, or a decided and stated reason
+not to add one; see [`AGENTS.md`](../AGENTS.md).
+
+`schedules` is read-only because the endpoint is: a
+[scheduled intercept](SCHEDULES.md) is declared in the service's config, not raised from a
+command line, because it diverts all of a workload's traffic rather than one header's worth.
+There is deliberately no `up --global` for the same reason.

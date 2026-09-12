@@ -98,6 +98,9 @@ helm template agentic-preview agentic-preview/agentic-preview \
 | `preview.headerName` | `x-preview` | The single header every preview is routed on. Its *value* is the work id. |
 | `preview.lifetime` | `24h` | How long a preview lives untouched before it is swept. `"off"` disables expiry — **quote it**, or YAML reads it as a boolean. |
 | `preview.readyTimeout` | `120s` | How long a create waits for the preview's pods before failing the POST with the reason. `0` skips the wait. |
+| `schedules` | `[]` | [Scheduled, headerless intercepts](../../docs/SCHEDULES.md). Empty means none, and nothing about that mode is rendered. Each entry needs `name`, `workload`, `namespace`, `targetService` and at least one `window`; rendering fails if a schedule names a namespace outside `allowedNamespaces`, in either direction. |
+| `scheduleDefaultLocation` | `""` (UTC) | The IANA zone every window is read in unless it sets its own `location`. Say which one you mean: a window written in local time and read in UTC is silently an hour wrong for half the year. |
+| `scheduleCheckInterval` | `30s` | Both how promptly a window opens or closes and how quickly a scheduled intercept that has died is noticed. Short because of the second. |
 | `service.type` | `ClusterIP` | |
 | `service.port` | `80` | |
 | `serviceAccount.create` | `true` | |

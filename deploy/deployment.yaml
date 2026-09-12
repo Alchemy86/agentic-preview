@@ -102,6 +102,19 @@ spec:
             # later. Set to 0 to skip the wait.
             - name: PREVIEW_READY_TIMEOUT
               value: 120s
+            # OPTIONAL - scheduled, HEADERLESS intercepts. Off unless both of
+            # these and the volume below are uncommented and schedules.yaml is
+            # added to kustomization.yaml's `resources`. Read that file first:
+            # a scheduled intercept diverts ALL of a workload's traffic, not one
+            # header's worth, and it cannot share a workload with a preview.
+            # - name: SCHEDULE_FILE
+            #   value: /etc/agentic-preview/schedules.yaml
+            # Both how promptly a window opens or closes AND how quickly a
+            # scheduled intercept that has died is noticed and re-raised. Short
+            # because of the second: a dead global intercept holds every request
+            # to the workload, and nobody is awake at 03:00 to notice.
+            # - name: SCHEDULE_CHECK_INTERVAL
+            #   value: 30s
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -131,6 +144,10 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /var/lib/agentic-preview
+            # OPTIONAL, with SCHEDULE_FILE above.
+            # - name: schedules
+            #   mountPath: /etc/agentic-preview
+            #   readOnly: true
       volumes:
         # Records the current session id so a restarted container can depart its
         # predecessor's session and release what it held. An emptyDir survives a
@@ -138,6 +155,14 @@ spec:
         # to the conflict-driven sweep, which is the one that actually matters.
         - name: state
           emptyDir: {}
+        # OPTIONAL, with SCHEDULE_FILE above. Read once at startup and never
+        # reloaded: a window that opens at 18:32 has to have been proved
+        # parseable at 09:00, not discovered to be unparseable at 18:32. Editing
+        # the ConfigMap therefore needs a restart, which is also the moment the
+        # schedule is re-validated.
+        # - name: schedules
+        #   configMap:
+        #     name: agentic-preview-schedules
       # Long enough for Shutdown to remove every intercept and depart the
       # session before the container is killed. Removing them is what makes a
       # stop safe: an intercept left in manager state with nobody holding its

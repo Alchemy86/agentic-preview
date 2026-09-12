@@ -1,0 +1,84 @@
+# Scheduled, HEADERLESS intercepts - OPTIONAL, and OFF unless you switch it on.
+#
+# This file is deliberately NOT in kustomization.yaml's `resources`. Switching
+# the mode on is three edits, all of them in this directory:
+#
+#   1. add `- schedules.yaml` to `resources` in kustomization.yaml
+#   2. uncomment the SCHEDULE_FILE and SCHEDULE_CHECK_INTERVAL env entries in
+#      deployment.yaml
+#   3. uncomment the `schedules` volumeMount and volume in deployment.yaml
+#
+# The twin of this file in the Helm chart does all three from one
+# `schedules:` list in values.yaml; see charts/agentic-preview/values.yaml.
+#
+# ---------------------------------------------------------------------------
+# WHAT A SCHEDULE DOES
+#
+# It gives ONE workload a recurring window. While the window is open
+# agentic-preview raises a GLOBAL intercept on it - no header filter at all, so
+# every connection to that port is diverted to `targetService`, whatever it
+# carries and whether it is TLS or plaintext. When the window closes the
+# intercept is removed and the workload serves its own traffic again. Nothing
+# calls /previews for this and nobody has to be awake.
+#
+# THREE THINGS THAT ARE NOT OBVIOUS, and all three are in docs/DESIGN.md:
+#
+#   * A WORKLOAD RUNS IN ONE INTERCEPT MODE AT A TIME. One header-filtered
+#     intercept puts the traffic-agent's whole port into HTTP mode, where a
+#     headerless intercept matches nothing while still reporting itself healthy.
+#     agentic-preview refuses both directions loudly rather than let that happen
+#     - so do not schedule a workload people raise previews against.
+#
+#   * IT IS ALL OF THAT WORKLOAD'S TRAFFIC, not one header's worth. That is the
+#     point, and it is also the risk: see docs/LIMITS.md on what an ungracefully
+#     killed pod does to a global intercept, and what the 30s check interval is
+#     there to bound.
+#
+#   * ALLOWED_NAMESPACES BOUNDS IT in both directions, exactly as it bounds a
+#     preview. A schedule naming a namespace outside the list is refused at
+#     startup, not at 18:32.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentic-preview-schedules
+  namespace: agentic-preview
+  labels:
+    app: agentic-preview
+data:
+  # PLACEHOLDER. `shop`, `checkout-api` and `auth-stub` are this repo's
+  # fictional example service, not a default - see the note in
+  # kustomization.yaml. Replace the whole block with your own window.
+  schedules.yaml: |
+    # The zone every window below is read in unless it names its own with
+    # `location`. Stated rather than left to default to UTC: a window written in
+    # local time and read in UTC is silently an hour wrong for half the year.
+    defaultLocation: Europe/London
+    schedules:
+      - name: offhours
+        workload: checkout-api
+        namespace: shop
+        # Port identifier on the intercepted workload: a service port name or
+        # number. Defaults to 80.
+        port: "8443"
+        # Only needed when the workload has more than one Service on the port,
+        # where the manager otherwise refuses with "multiple interceptable
+        # services with port N - please specify the service".
+        # service: checkout-tls
+        #
+        # Where traffic goes while the window is open. "name" or
+        # "name.namespace"; the namespace must be in ALLOWED_NAMESPACES.
+        targetService: auth-stub
+        targetPort: 8443
+        windows:
+          # An overnight reads naturally as an end time, and an end at or before
+          # the start means the next day - so this is 18:32 through to 07:21.
+          - days: [Mon, Tue, Wed, Thu]
+            start: "18:32"
+            end: "07:21"
+          # Anything longer than a day needs a duration instead: Friday evening
+          # straight through to Monday morning is ONE window, not three, because
+          # `days` are the days a window OPENS on, never the days it covers.
+          - days: [Fri]
+            start: "18:32"
+            duration: 60h49m

@@ -64,6 +64,11 @@ func main() {
 	// touched them for PREVIEW_LIFETIME.
 	go r.ReapExpired(runCtx)
 
+	// The scheduled-intercept controller. It returns immediately when no
+	// SCHEDULE_FILE is set, which is what keeps a service with no declared
+	// window byte-for-byte unaffected by this mode.
+	go r.RunSchedules(runCtx)
+
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           r.Handler(),

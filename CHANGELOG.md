@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Scheduled, headerless intercepts** — the one mode here that is not header-keyed, and off
+  unless a window is declared. A `SCHEDULE_FILE` gives a workload a recurring window; while
+  it is open agentic-preview raises a *global* intercept on it (no header filter at all, so
+  the traffic-agent keeps the port on its raw TCP listener and diverts every connection,
+  TLS or plaintext, without parsing a byte), and on close it removes it exactly as a graceful
+  stop does. Built for a service whose dependency is switched off outside working hours: a
+  stand-in answers for it, and nothing in the estate has to know about the swap.
+  [`docs/SCHEDULES.md`](docs/SCHEDULES.md) is the page.
+- Windows are `days` + `start` + either `end` or `duration`, in a named IANA zone (the zone
+  database is compiled in). `end` at or before `start` is the next day, so an overnight reads
+  as `18:32` → `07:21`; `duration` is what expresses a span longer than a day, so Friday
+  evening through to Monday morning is one window and not three.
+- **Both directions of the two-mode clash are refused loudly.** A workload runs in ONE
+  intercept mode at a time — one header-filtered intercept switches the whole traffic-agent
+  port to HTTP mode, where a filterless intercept qualifies for neither matching tier and is
+  silently inert while still reporting `ACTIVE`. So a window opening on a workload that
+  already carries a header-keyed preview is refused and alarmed rather than opened, and a
+  `POST /previews` for a workload holding a scheduled intercept is refused with `409`. Both
+  messages name the other side.
+- **A self-health check on every open window**, because a global intercept that dies takes all
+  of a workload's traffic with it rather than one header's worth, and a window is open when
+  nobody is watching. Every `SCHEDULE_CHECK_INTERVAL` (30s) the controller asks the manager
+  whether its own intercept still exists and in what state, and re-raises or alarms. Measured
+  recovery: 1.6s from a `kill -9`, 11s from a force-deleted pod, 9s from the node-agent being
+  deleted underneath it — none of the three hung, and none needed the expiry sweep.
+- `GET /schedules` and `kubectl agentic-preview schedules` report every declared window,
+  whether it is open, whether its intercept is up, and the problem if it is open and is not.
+  Read-only: a global intercept is a thing to review in a repository, not a thing anything
+  that can reach the Service may raise.
+- The chart grows `schedules`, `scheduleDefaultLocation` and `scheduleCheckInterval`, refuses
+  at render time to declare a schedule outside `allowedNamespaces`, and carries a checksum of
+  the schedule ConfigMap so editing a window rolls the pod. `deploy/` grows `schedules.yaml`,
+  deliberately not applied, with the three edits that switch it on in its header.
+
+Nothing about a workload with no declared window changes: with `SCHEDULE_FILE` unset the
+controller returns on its first line and no other code path is reached.
+
 ## v0.2.0
 
 ### Added

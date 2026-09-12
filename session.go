@@ -68,10 +68,13 @@ type Server struct {
 	// raiseMu serialises intercept creation: PrepareIntercept provisions the
 	// node-agent Job, and two concurrent Prepares for one workload race.
 	raiseMu sync.Mutex
+	// sched is the schedule controller's own memory, keyed by schedule name.
+	// Empty and untouched when no schedule is declared.
+	sched *scheduleStates
 }
 
 func NewServer(cfg *config) *Server {
-	s := &Server{cfg: cfg, reg: newRegistry()}
+	s := &Server{cfg: cfg, reg: newRegistry(), sched: newScheduleStates()}
 	s.agents = newAgentPool(s)
 	if k, err := newKubeAPI(); err != nil {
 		s.kubeErr = err
@@ -383,13 +386,23 @@ func (s *Server) raise(ctx context.Context, p *Preview) error {
 		TargetHost:     p.TargetHost,
 		TargetPort:     int32(p.TargetPort),
 		PortIdentifier: p.PortID,
-		HeaderFilters:  map[string]string{p.HeaderName: p.HeaderValue},
+		// Nil for a global intercept, and that is the whole switch between the
+		// two mechanisms. See Preview.headerFilters.
+		HeaderFilters: p.headerFilters(),
 		// node_agent asks the manager for a standalone Job pinned to the
 		// target's node instead of injecting a sidecar, so the target pod is
 		// never restarted and is left byte-identical.
 		NodeAgent:        true,
 		RoundtripLatency: int64(2 * time.Second),
 		DialTimeout:      int64(10 * time.Second),
+	}
+
+	// Named only when the caller had to: a workload with two Services on one
+	// port makes PrepareIntercept refuse with "multiple interceptable services
+	// with port N - please specify the service", which is otherwise an error
+	// about a flag this API does not have.
+	if p.ServiceName != "" {
+		spec.ServiceName = p.ServiceName
 	}
 
 	// PrepareIntercept is where the node-agent Job is provisioned. It also
@@ -426,8 +439,12 @@ func (s *Server) raise(ctx context.Context, p *Preview) error {
 	}
 
 	s.reg.setStatus(p.Name, ii.GetDisposition().String(), ii.GetMessage())
-	logf("raised %s: %s.%s %s: %s -> %s:%d (%s)",
-		p.Name, p.Workload, p.Namespace, p.HeaderName, p.HeaderValue,
+	match := p.HeaderName + ": " + p.HeaderValue
+	if p.Global {
+		match = "GLOBAL (no header, all traffic to the port)"
+	}
+	logf("raised %s: %s.%s %s -> %s:%d (%s)",
+		p.Name, p.Workload, p.Namespace, match,
 		p.TargetHost, p.TargetPort, ii.GetDisposition())
 
 	// The tunnel this workload needs may not exist yet, or may be for a
@@ -464,7 +481,11 @@ func (s *Server) remove(ctx context.Context, p *Preview) error {
 		}
 	}
 
-	logf("removed %s (%s.%s, work id %s)", p.Name, p.Workload, p.Namespace, p.WorkID)
+	kind := "work id " + p.WorkID
+	if p.Schedule != "" {
+		kind = "schedule " + p.Schedule
+	}
+	logf("removed %s (%s.%s, %s)", p.Name, p.Workload, p.Namespace, kind)
 	s.agents.reconcileNow()
 	return firstErr
 }

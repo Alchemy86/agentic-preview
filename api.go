@@ -18,6 +18,7 @@ import (
 //	GET    /previews/{workId}                         one work id's service set
 //	DELETE /previews/{workId}                         remove a whole work id
 //	DELETE /previews/{workId}/{namespace}/{workload}  remove one service of it
+//	GET    /schedules                                 declared scheduled intercepts and their state
 //	GET    /healthz                                   liveness
 //	GET    /readyz                                    ready once a manager session exists
 func (s *Server) Handler() http.Handler {
@@ -28,6 +29,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/previews", s.handlePreviews)
 	mux.HandleFunc("/previews/", s.handlePreviewPath)
+	mux.HandleFunc("/schedules", s.handleSchedules)
 	return logging(mux)
 }
 
@@ -53,6 +55,32 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	if !connected {
 		writeJSON(w, http.StatusServiceUnavailable, body)
 		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// handleSchedules reports every declared scheduled intercept and what the
+// controller last made of it.
+//
+// It is read-only on purpose: a schedule is declared in config so that it is
+// reviewable and survives a restart, and a window that could be opened by an
+// HTTP call would be a global intercept anybody could raise on a workload
+// nobody asked about. The field to watch is "problem" - empty is the only good
+// value while "open" is true.
+func (s *Server) handleSchedules(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed,
+			"use GET: schedules are declared in SCHEDULE_FILE, not raised over the API")
+		return
+	}
+	body := map[string]any{
+		"checkInterval": s.cfg.scheduleCheckInterval.String(),
+		"schedules":     s.ScheduleStatuses(),
+	}
+	if s.cfg.schedulePath == "" {
+		body["note"] = "no SCHEDULE_FILE is set, so nothing is scheduled and no intercept is raised without a POST /previews"
+	} else {
+		body["file"] = s.cfg.schedulePath
 	}
 	writeJSON(w, http.StatusOK, body)
 }
@@ -83,6 +111,30 @@ func (s *Server) handleAdd(w http.ResponseWriter, req *http.Request) {
 	p, err := pr.validate(s.cfg)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// A schedule's intercept is registered under the schedule's name as its
+	// work id, so a POST using that name would land on the same registry key
+	// and the two would take turns evicting each other.
+	if s.cfg.scheduledNames()[p.WorkID] {
+		writeErr(w, http.StatusConflict, fmt.Sprintf(
+			"workId %q is the name of a declared scheduled intercept and is reserved; use a different work id", p.WorkID))
+		return
+	}
+
+	// The other half of the refusal in registry.conflictingMode. A workload
+	// carrying a live SCHEDULED (headerless) intercept has its traffic-agent
+	// port on the raw TCP listener; a header-keyed preview raised alongside it
+	// would be created, reported ACTIVE, and match nothing, because the global
+	// intercept is the one that listener serves. Saying so beats a preview that
+	// appears to exist and never receives a request.
+	if other := s.reg.conflictingMode(p); other != nil {
+		writeErr(w, http.StatusConflict, fmt.Sprintf(
+			"%s.%s is currently held by the scheduled global intercept %q (schedule %s), which diverts ALL traffic to that port. "+
+				"A workload runs in ONE intercept mode at a time, so a header-keyed preview raised now would match nothing. "+
+				"Wait for that schedule's window to close, or take the workload off the schedule",
+			p.Workload, p.Namespace, other.Name, other.Schedule))
 		return
 	}
 
@@ -231,6 +283,12 @@ func (s *Server) handlePreviewPath(w http.ResponseWriter, req *http.Request) {
 // the preview after it merges, and this service has no opinion about pull
 // requests in any case.
 func (s *Server) handleRemoveWork(w http.ResponseWriter, req *http.Request, workID string) {
+	if s.cfg.scheduledNames()[workID] {
+		writeErr(w, http.StatusConflict, fmt.Sprintf(
+			"%q is a scheduled intercept, not a work id: it goes when its window closes and the controller would raise it again. "+
+				"Remove its window from SCHEDULE_FILE to stop it", workID))
+		return
+	}
 	removed, deleted, problems, found := s.tearDownWork(req.Context(), workID)
 	if !found {
 		writeErr(w, http.StatusNotFound, fmt.Sprintf("work id %q has nothing live", workID))
@@ -250,6 +308,12 @@ func (s *Server) handleRemoveWork(w http.ResponseWriter, req *http.Request, work
 // change stays up - one repository's part of it is finished with, the others
 // are not.
 func (s *Server) handleRemoveService(w http.ResponseWriter, req *http.Request, k serviceKey) {
+	if s.cfg.scheduledNames()[k.WorkID] {
+		writeErr(w, http.StatusConflict, fmt.Sprintf(
+			"%q is a scheduled intercept, not a work id: it goes when its window closes and the controller would raise it again. "+
+				"Remove its window from SCHEDULE_FILE to stop it", k.WorkID))
+		return
+	}
 	p, ok := s.reg.removeService(k)
 	deleted, problems := s.dropWorkload(req.Context(), k.WorkID, k.Workload)
 	if !ok && len(deleted) == 0 {
