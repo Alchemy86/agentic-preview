@@ -10,6 +10,53 @@ entries:
           description: One attach Role and one build Role per entry in allowedNamespaces, never a ClusterRole
       artifacthub.io/images: |
         - name: agentic-preview
+          image: ghcr.io/alchemy86/agentic-preview:0.6.0
+          platforms:
+            - linux/amd64
+            - linux/arm64
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: source
+          url: https://github.com/Alchemy86/agentic-preview
+        - name: support
+          url: https://github.com/Alchemy86/agentic-preview/issues
+        - name: design notes
+          url: https://github.com/Alchemy86/agentic-preview/blob/main/docs/DESIGN.md
+      artifacthub.io/prerelease: "false"
+    apiVersion: v2
+    appVersion: 0.6.0
+    created: "2026-09-12T19:44:29.035059969Z"
+    description: Header-routed preview environments in Kubernetes, raised by your
+      pipeline rather than your laptop.
+    digest: bf50e273288582984a4f77cc2ec733dd1fdf7d515270973cd53baf704c3a3582
+    home: https://github.com/Alchemy86/agentic-preview
+    icon: https://raw.githubusercontent.com/Alchemy86/agentic-preview/main/brand/agentic-preview-icon.png
+    keywords:
+    - preview-environments
+    - ephemeral-environments
+    - telepresence
+    - kubernetes
+    - developer-tools
+    kubeVersion: '>=1.21.0-0'
+    maintainers:
+    - name: Alchemy86
+      url: https://github.com/Alchemy86
+    name: agentic-preview
+    sources:
+    - https://github.com/Alchemy86/agentic-preview
+    type: application
+    urls:
+    - https://alchemy86.github.io/agentic-preview/agentic-preview-0.6.0.tgz
+    version: 0.6.0
+  - annotations:
+      artifacthub.io/category: integration-delivery
+      artifacthub.io/changes: |
+        - kind: added
+          description: First published chart, parameterising the manifests in deploy/
+        - kind: added
+          description: One attach Role and one build Role per entry in allowedNamespaces, never a ClusterRole
+      artifacthub.io/images: |
+        - name: agentic-preview
           image: ghcr.io/alchemy86/agentic-preview:0.5.0
           platforms:
             - linux/amd64
@@ -25,7 +72,7 @@ entries:
       artifacthub.io/prerelease: "false"
     apiVersion: v2
     appVersion: 0.5.0
-    created: "2026-09-12T14:23:28.02604699Z"
+    created: "2026-09-12T19:44:29.034283174Z"
     description: Header-routed preview environments in Kubernetes, raised by your
       pipeline rather than your laptop.
     digest: 36db7de3817eb3ddec01b4eed7dd3eee63b4fc75c91a44f09d7fd467731a32a9
@@ -72,7 +119,7 @@ entries:
       artifacthub.io/prerelease: "false"
     apiVersion: v2
     appVersion: 0.4.0
-    created: "2026-09-12T14:23:28.025357514Z"
+    created: "2026-09-12T19:44:29.033637018Z"
     description: Header-routed preview environments in Kubernetes, raised by your
       pipeline rather than your laptop.
     digest: 136d0b3bce96c8002229fa879c3f495447d668f659d75e08ccb0590f9609ecc0
@@ -119,7 +166,7 @@ entries:
       artifacthub.io/prerelease: "false"
     apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-09-12T14:23:28.024704276Z"
+    created: "2026-09-12T19:44:29.032964924Z"
     description: Header-routed preview environments in Kubernetes, raised by your
       pipeline rather than your laptop.
     digest: 471609d49e8f54a3cbafe71fb6b84f28796ae3e2519a2729338afe26f1bb846e
@@ -166,7 +213,7 @@ entries:
       artifacthub.io/prerelease: "false"
     apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-09-12T14:23:28.024031512Z"
+    created: "2026-09-12T19:44:29.032243721Z"
     description: Header-routed preview environments in Kubernetes, raised by your
       pipeline rather than your laptop.
     digest: d8980947910a0b9f44fc6fcecf0a5cfa460e7c1251b315627dc51e35708873a1
@@ -189,4 +236,4 @@ entries:
     urls:
     - https://alchemy86.github.io/agentic-preview/agentic-preview-0.2.0.tgz
     version: 0.2.0
-generated: "2026-09-12T14:23:28.023316378Z"
+generated: "2026-09-12T19:44:29.03146459Z"
