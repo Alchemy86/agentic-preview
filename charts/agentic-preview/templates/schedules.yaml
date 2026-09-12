@@ -1,31 +1,67 @@
 {{- if .Values.schedules }}
 {{- /*
-  Scheduled, headerless intercepts.
+  Schedules: recurring windows, of two kinds. `type: intercept` globally
+  intercepts one workload; `type: dns` redirects one DNS name. The windows, the
+  zone and the reconcile loop are the same machinery for both.
 
   Rendered ONLY when schedules are declared, so an install that does not use
   them gets no ConfigMap, no volume and no SCHEDULE_FILE, and the controller in
   the service returns immediately.
 
-  A schedule's namespaces are checked here as well as in the service because a
+  Everything below is checked here as well as in the service because a
   render-time failure is readable and a startup failure is a CrashLoopBackOff
-  somebody has to go and read logs for. Both ends check the same boundary:
-  allowedNamespaces bounds where a schedule may intercept AND where it may
-  divert traffic to, exactly as it does for a preview.
+  somebody has to go and read logs for. Both ends check the same things:
+  allowedNamespaces bounds where an intercept schedule may intercept AND where
+  it may divert traffic to, exactly as it does for a preview, and a DNS schedule
+  has to have been told which ConfigMap it may write.
 */}}
 {{- $allowed := include "agentic-preview.allowedNamespaces" . | fromYamlArray }}
 {{- range $i, $s := .Values.schedules }}
   {{- if not $s.name }}{{ fail (printf "schedules[%d]: name is required" $i) }}{{ end }}
-  {{- if not $s.workload }}{{ fail (printf "schedules[%d] (%s): workload is required" $i $s.name) }}{{ end }}
-  {{- if not $s.namespace }}{{ fail (printf "schedules[%d] (%s): namespace is required" $i $s.name) }}{{ end }}
-  {{- if not $s.targetService }}{{ fail (printf "schedules[%d] (%s): targetService is required - the Service traffic is diverted to while the window is open" $i $s.name) }}{{ end }}
   {{- if not $s.windows }}{{ fail (printf "schedules[%d] (%s): at least one window is required" $i $s.name) }}{{ end }}
-  {{- if not (has $s.namespace $allowed) }}
-    {{- fail (printf "schedules[%d] (%s): namespace %q is not in allowedNamespaces (%s). A schedule may only intercept where a preview may" $i $s.name $s.namespace (join ", " $allowed)) }}
-  {{- end }}
-  {{- $targetNS := $s.namespace }}
-  {{- if $s.targetNamespace }}{{ $targetNS = $s.targetNamespace }}{{ else if contains "." $s.targetService }}{{ $targetNS = index (splitList "." $s.targetService) 1 }}{{ end }}
-  {{- if not (has $targetNS $allowed) }}
-    {{- fail (printf "schedules[%d] (%s): forward-target namespace %q is not in allowedNamespaces (%s). This is the namespace of targetService, what traffic is diverted TO" $i $s.name $targetNS (join ", " $allowed)) }}
+  {{- /*
+    The kind is DECLARED, never inferred from which fields are filled in, and
+    the same refusal is made here and in the service. An entry that says one
+    kind and carries the other's fields was written by somebody who believed it
+    would do both, and whichever half won silently would be the one they were
+    not thinking about.
+  */}}
+  {{- if not $s.type }}
+    {{- fail (printf "schedules[%d] (%s): type is required, and must be \"intercept\" or \"dns\". An existing schedule that intercepts a workload is `type: intercept`" $i $s.name) }}
+  {{- else if eq $s.type "intercept" }}
+    {{- if or $s.hostname $s.redirectTo }}
+      {{- fail (printf "schedules[%d] (%s): is `type: intercept` but carries hostname/redirectTo, which are DNS-mode fields. An entry is exactly one kind" $i $s.name) }}
+    {{- end }}
+    {{- if not $s.workload }}{{ fail (printf "schedules[%d] (%s): workload is required" $i $s.name) }}{{ end }}
+    {{- if not $s.namespace }}{{ fail (printf "schedules[%d] (%s): namespace is required" $i $s.name) }}{{ end }}
+    {{- if not $s.targetService }}{{ fail (printf "schedules[%d] (%s): targetService is required - the Service traffic is diverted to while the window is open" $i $s.name) }}{{ end }}
+    {{- if not (has $s.namespace $allowed) }}
+      {{- fail (printf "schedules[%d] (%s): namespace %q is not in allowedNamespaces (%s). A schedule may only intercept where a preview may" $i $s.name $s.namespace (join ", " $allowed)) }}
+    {{- end }}
+    {{- $targetNS := $s.namespace }}
+    {{- if $s.targetNamespace }}{{ $targetNS = $s.targetNamespace }}{{ else if contains "." $s.targetService }}{{ $targetNS = index (splitList "." $s.targetService) 1 }}{{ end }}
+    {{- if not (has $targetNS $allowed) }}
+      {{- fail (printf "schedules[%d] (%s): forward-target namespace %q is not in allowedNamespaces (%s). This is the namespace of targetService, what traffic is diverted TO" $i $s.name $targetNS (join ", " $allowed)) }}
+    {{- end }}
+  {{- else if eq $s.type "dns" }}
+    {{- if or $s.workload $s.namespace $s.service $s.targetService $s.targetNamespace $s.port $s.targetPort }}
+      {{- fail (printf "schedules[%d] (%s): is `type: dns` but carries intercept-mode fields (workload/namespace/service/target*/port). An entry is exactly one kind" $i $s.name) }}
+    {{- end }}
+    {{- if not $s.hostname }}{{ fail (printf "schedules[%d] (%s): hostname is required - the DNS name overridden while the window is open" $i $s.name) }}{{ end }}
+    {{- if not $s.redirectTo }}{{ fail (printf "schedules[%d] (%s): redirectTo is required - the literal IP address %s resolves to while the window is open" $i $s.name $s.hostname) }}{{ end }}
+    {{- /*
+      Where a DNS schedule writes is not defaulted, here or in the service. A
+      window declared with nowhere to write it is the failure this whole mode is
+      built against, and finding out at 18:32 is the one time it must not.
+    */}}
+    {{- if not $.Values.scheduleDNSConfigMap.name }}
+      {{- fail (printf "schedules[%d] (%s): a `type: dns` schedule needs scheduleDNSConfigMap.namespace and .name - the ConfigMap whose key the hosts line is written into. There is no default: in a cluster this is usually kube-system/coredns-custom, and pointing at it is a decision to make out loud. The permission for it is a separate grant this chart does not create - see values.yaml" $i $s.name) }}
+    {{- end }}
+    {{- if not $.Values.scheduleDNSConfigMap.namespace }}
+      {{- fail (printf "schedules[%d] (%s): scheduleDNSConfigMap.name is set but .namespace is not" $i $s.name) }}
+    {{- end }}
+  {{- else }}
+    {{- fail (printf "schedules[%d] (%s): type %q is not a kind of schedule: it is \"intercept\" (globally intercept a workload) or \"dns\" (redirect a DNS name)" $i $s.name $s.type) }}
   {{- end }}
 {{- end }}
 apiVersion: v1

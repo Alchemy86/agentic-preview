@@ -246,8 +246,8 @@ GET    /previews                                  every work id, what it spans, 
 GET    /previews/{workId}                         one work id's service set
 DELETE /previews/{workId}/{namespace}/{workload}  remove one service of a work id
 DELETE /previews/{workId}                         remove a whole work id
-GET    /schedules                                 declared scheduled intercepts and
-                                                  their state (read-only)
+GET    /schedules                                 declared schedules and their state
+POST   /schedules/{name}/override                 force one open or closed now, or auto
 GET    /healthz                                   liveness
 GET    /readyz                                    a session per allowed namespace, and every tunnel
 ```
@@ -341,6 +341,12 @@ cluster.
   against it is worse than a forgotten pod.
 - **If you expire preview images, exclude the ones in use.** `GET /previews` reports the
   image each preview runs precisely so a retention policy can skip them.
+- **A [schedule](docs/SCHEDULES.md) has two kinds and a `type:` that says which.**
+  `type: intercept` diverts a whole workload; `type: dns` redirects one DNS name by writing a
+  line into a CoreDNS ConfigMap, for a dependency that is not a workload at all. The second
+  needs a ConfigMap named in config and a permission the shipped RBAC deliberately does not
+  grant; without it the schedule alarms rather than crash-looping. Either kind can be forced
+  open or closed on demand, on the same authenticated surface a preview is raised on.
 - **A [scheduled intercept](docs/SCHEDULES.md) cannot share a workload with a preview**, and
   a scheduled intercept that dies takes *all* of that workload's traffic with it rather than
   one header's worth. Both are refusals rather than surprises — both directions of the clash

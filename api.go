@@ -18,7 +18,8 @@ import (
 //	GET    /previews/{workId}                         one work id's service set
 //	DELETE /previews/{workId}                         remove a whole work id
 //	DELETE /previews/{workId}/{namespace}/{workload}  remove one service of it
-//	GET    /schedules                                 declared scheduled intercepts and their state
+//	GET    /schedules                                 declared schedules and their state
+//	POST   /schedules/{name}/override                 force one open or closed now, or back to auto
 //	GET    /healthz                                   liveness
 //	GET    /readyz                                    ready once a manager session exists
 func (s *Server) Handler() http.Handler {
@@ -30,6 +31,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/previews", s.handlePreviews)
 	mux.HandleFunc("/previews/", s.handlePreviewPath)
 	mux.HandleFunc("/schedules", s.handleSchedules)
+	mux.HandleFunc("/schedules/", s.handleSchedulePath)
 	return logging(mux)
 }
 
@@ -74,14 +76,16 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// handleSchedules reports every declared scheduled intercept and what the
-// controller last made of it.
+// handleSchedules reports every declared schedule and what the controller last
+// made of it.
 //
-// It is read-only on purpose: a schedule is declared in config so that it is
-// reviewable and survives a restart, and a window that could be opened by an
-// HTTP call would be a global intercept anybody could raise on a workload
-// nobody asked about. The field to watch is "problem" - empty is the only good
-// value while "open" is true.
+// The SET of schedules is read-only here on purpose: a schedule is declared in
+// config so that it is reviewable and survives a restart, and a window that
+// could be CREATED by an HTTP call would be a global intercept anybody could
+// raise on a workload nobody asked about. What an already-declared schedule is
+// doing right now can be forced - see handleScheduleOverride, which reaches the
+// same surface a preview is raised on and no other. The field to watch is
+// "problem" - empty is the only good value while "open" is true.
 func (s *Server) handleSchedules(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed,
@@ -98,6 +102,98 @@ func (s *Server) handleSchedules(w http.ResponseWriter, req *http.Request) {
 		body["file"] = s.cfg.schedulePath
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// OverrideRequest is the body of POST /schedules/{name}/override.
+type OverrideRequest struct {
+	// State is "open", "closed", or "auto" to clear the override and let the
+	// declared windows decide again.
+	State string `json:"state"`
+	// Duration is how long the override lasts, as a Go duration. Empty means
+	// until it is cleared - which is honest, and reported on every GET
+	// /schedules for as long as it lasts.
+	Duration string `json:"duration,omitempty"`
+	// Reason is a free-text note, never parsed, reported back alongside the
+	// override so the next person can see why it is there.
+	Reason string `json:"reason,omitempty"`
+}
+
+// handleSchedulePath is POST /schedules/{name}/override: force one declared
+// schedule open or closed right now, or hand it back to its windows.
+//
+// It is the same lever a preview has - raise it on demand rather than waiting
+// for whatever normally raises it - and it deliberately arrives at the same
+// door. This API is reachable through the API server's service proxy, which is
+// what `kubectl agentic-preview` uses and what the cluster's own RBAC guards;
+// putting the override anywhere else would give a global intercept a second,
+// laxer way to be flipped, and the property that it cannot be is the reason the
+// schedules page says what it says.
+//
+// It overrides only the ANSWER to "should this be open now". The reconcile loop
+// is untouched: it still opens, health-checks, drift-checks, re-raises and
+// alarms exactly as it does for a window edge.
+func (s *Server) handleSchedulePath(w http.ResponseWriter, req *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(req.URL.Path, "/schedules/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "override" {
+		writeErr(w, http.StatusBadRequest,
+			"use POST /schedules/{name}/override, or GET /schedules to read them all")
+		return
+	}
+	name := parts[0]
+
+	switch req.Method {
+	case http.MethodDelete:
+		s.handleScheduleOverride(w, name, OverrideRequest{State: overrideAuto})
+	case http.MethodPost:
+		var body OverrideRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<16)).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		s.handleScheduleOverride(w, name, body)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed,
+			`use POST /schedules/{name}/override with {"state":"open"|"closed"|"auto"}, or DELETE to clear it`)
+	}
+}
+
+func (s *Server) handleScheduleOverride(w http.ResponseWriter, name string, body OverrideRequest) {
+	var d time.Duration
+	if v := strings.TrimSpace(body.Duration); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("duration %q: %v", body.Duration, err))
+			return
+		}
+		d = parsed
+	}
+
+	ov, err := s.SetOverride(name, body.State, body.Reason, d, time.Now())
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.HasPrefix(err.Error(), "no schedule is named") {
+			code = http.StatusNotFound
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+
+	out := map[string]any{
+		"schedule": name,
+		// The override changes what the NEXT tick reconciles to, so the change
+		// is visible within one check interval rather than instantly. Saying so
+		// is the difference between a caller that waits and one that retries.
+		"appliesWithin": s.cfg.scheduleCheckInterval.String(),
+	}
+	if ov == nil {
+		out["override"] = nil
+		out["note"] = "override cleared; the schedule's declared windows decide again"
+	} else {
+		out["override"] = ov
+		out["note"] = "the reconcile loop still health-checks, drift-checks and re-applies this schedule as it always does"
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handlePreviews(w http.ResponseWriter, req *http.Request) {

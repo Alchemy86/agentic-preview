@@ -79,10 +79,14 @@ preview:
   # and obvious ten seconds later. `0` skips the wait.
   readyTimeout: 120s
 
-# Scheduled, HEADERLESS intercepts. Empty - the default - means there are none
-# and nothing about this mode is rendered or reached.
+# Schedules: recurring windows. Empty - the default - means there are none and
+# nothing about this mode is rendered or reached.
 #
-# A schedule gives ONE workload a recurring window. While the window is open
+# There are two KINDS and every entry says which it is in `type:`. The name, the
+# windows and the zone mean the same thing in both, and there is one
+# implementation of them.
+#
+# `type: intercept` gives ONE workload a recurring window. While the window is open
 # agentic-preview raises a GLOBAL intercept on it: no header filter at all, so
 # every connection to that port is diverted to targetService, whatever it
 # carries and whether it is TLS or plaintext. When the window closes the
@@ -107,8 +111,17 @@ preview:
 #   * ALLOWED NAMESPACES BOUND IT, in both directions, exactly as they bound a
 #     preview. The chart refuses to render a schedule outside the list.
 #
+# `type: dns` gives ONE DNS NAME a recurring window instead, and exists because
+# an intercept needs a workload: a dependency with no pod, Deployment or Service
+# - a managed database behind Private Link, an appliance - has no interception
+# point in the cluster except the resolver. While the window is open one tagged
+# `hosts` line is written into scheduleDNSConfigMap below, and removed when it
+# closes. It changes that name for the WHOLE cluster, not for one workload and
+# not for one header.
+#
 #   schedules:
 #     - name: offhours              # the id it is reported under; reserved as a work id
+#       type: intercept             # required, and never inferred from the fields below
 #       workload: checkout-api
 #       namespace: shop
 #       port: "8443"                # port identifier on the workload, default 80
@@ -126,7 +139,40 @@ preview:
 #         - days: [Fri]
 #           start: "18:32"
 #           duration: 60h49m
+#
+#     - name: db-offhours
+#       type: dns
+#       hostname: dev-db.example.internal   # the name overridden while the window is open
+#       redirectTo: 10.42.0.9               # where it points, as a LITERAL IP - see below
+#       windows:
+#         - days: [Mon, Tue, Wed, Thu]
+#           start: "18:32"
+#           end:   "07:21"
 schedules: []
+
+# The ONE ConfigMap key a `type: dns` schedule writes its hosts line into. It is
+# required as soon as one is declared, and there is NO DEFAULT on purpose.
+#
+# In a cluster this is kube-system/coredns-custom, key host.override - but
+# defaulting to it would make "I declared a window" and "I edited the cluster's
+# resolver" the same act. Naming it is the decision, and it is made here.
+#
+# redirectTo is a literal IP rather than a Service name for the matching reason:
+# resolving a name would put a Kubernetes lookup, and a way for it to fail at
+# 18:32 with nobody watching, on the path of the one operation that must not be
+# fragile. To point at a Service, write its ClusterIP down.
+#
+# THE PERMISSION IS A SEPARATE GRANT AND THIS CHART DOES NOT CREATE IT. That
+# ConfigMap is outside allowedNamespaces - the fence this chart draws is about
+# intercepting workloads and has nothing to say about the resolver - so a Role
+# granting get and update on it, with resourceNames pinning it to the one
+# ConfigMap, is yours to apply deliberately. deploy/rbac.yaml carries it
+# commented out, verbatim. Without it nothing crash-loops: the schedule alarms
+# and `problem` on GET /schedules names the ConfigMap it may not write.
+scheduleDNSConfigMap:
+  namespace: ""
+  name: ""
+  key: host.override
 
 # Changing any of the three settings below rolls the pod: the file is read once
 # at startup on purpose, so a change has to restart something to take effect.

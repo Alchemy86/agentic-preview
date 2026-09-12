@@ -36,6 +36,17 @@ type kubeAPI interface {
 	deleteService(ctx context.Context, ns, name string) error
 
 	listPods(ctx context.Context, ns, selector string) ([]corev1.Pod, error)
+
+	// The two below are used by DNS-redirect schedules ONLY, against the single
+	// ConfigMap named by SCHEDULE_DNS_CONFIGMAP_NAMESPACE/_NAME, and only when
+	// such a schedule is declared. There is no create: this service never
+	// brings a resolver ConfigMap into existence, it edits one line of one that
+	// already exists. See dns.go, and the commented Role in deploy/rbac.yaml -
+	// that ConfigMap is usually in kube-system, which is NOT in
+	// ALLOWED_NAMESPACES, so the permission is a deliberate, separate grant
+	// rather than something the shipped RBAC hands out.
+	getConfigMap(ctx context.Context, ns, name string) (*corev1.ConfigMap, error)
+	updateConfigMap(ctx context.Context, cm *corev1.ConfigMap) (*corev1.ConfigMap, error)
 }
 
 // clusterKube is the real implementation, against the in-cluster API server.
@@ -125,6 +136,14 @@ func (k *clusterKube) listPods(ctx context.Context, ns, selector string) ([]core
 		return nil, err
 	}
 	return l.Items, nil
+}
+
+func (k *clusterKube) getConfigMap(ctx context.Context, ns, name string) (*corev1.ConfigMap, error) {
+	return k.cs.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (k *clusterKube) updateConfigMap(ctx context.Context, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	return k.cs.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
 }
 
 func isNotFound(err error) bool { return apierrors.IsNotFound(err) }

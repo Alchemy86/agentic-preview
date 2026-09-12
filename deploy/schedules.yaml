@@ -8,13 +8,21 @@
 #      deployment.yaml
 #   3. uncomment the `schedules` volumeMount and volume in deployment.yaml
 #
+# A FOURTH, and only because the example below declares a `type: dns` entry
+# (`db-offhours`): uncomment the three SCHEDULE_DNS_CONFIGMAP_* env entries in
+# deployment.yaml too, or delete that entry. A declared DNS schedule with no
+# ConfigMap configured is fatal at boot - deliberately, see below - so the three
+# edits on their own would leave the pod in CrashLoopBackOff.
+#
 # The twin of this file in the Helm chart does all three from one
 # `schedules:` list in values.yaml; see charts/agentic-preview/values.yaml.
 #
 # ---------------------------------------------------------------------------
 # WHAT A SCHEDULE DOES
 #
-# It gives ONE workload a recurring window. While the window is open
+# There are two KINDS, and every entry says which it is in `type:`.
+#
+# `type: intercept` gives ONE workload a recurring window. While the window is open
 # agentic-preview raises a GLOBAL intercept on it - no header filter at all, so
 # every connection to that port is diverted to `targetService`, whatever it
 # carries and whether it is TLS or plaintext. When the window closes the
@@ -37,6 +45,23 @@
 #   * ALLOWED_NAMESPACES BOUNDS IT in both directions, exactly as it bounds a
 #     preview. A schedule naming a namespace outside the list is refused at
 #     startup, not at 18:32.
+#
+# `type: dns` gives ONE DNS NAME a recurring window instead. It exists because
+# an intercept needs a workload: a dependency with no pod, Deployment or Service
+# anywhere - a managed database behind Private Link, an appliance - has no
+# interception point in the cluster except the resolver. While the window is
+# open agentic-preview writes ONE tagged `hosts` line into the ConfigMap named
+# by SCHEDULE_DNS_CONFIGMAP_NAMESPACE/_NAME/_KEY, and removes exactly that line
+# when it closes. TWO THINGS ABOUT IT:
+#
+#   * THAT ConfigMap IS NOT DEFAULTED and the shipped RBAC does NOT grant access
+#     to it. In a cluster it is usually kube-system/coredns-custom; see the
+#     commented Role at the end of rbac.yaml, and read docs/SCHEDULES.md before
+#     uncommenting it. Without the grant the schedule alarms and says so on GET
+#     /schedules; nothing crash-loops.
+#
+#   * IT CHANGES A NAME FOR THE WHOLE CLUSTER, not for one workload and not for
+#     one header. Everything that resolves that name gets the redirect.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
@@ -55,7 +80,11 @@ data:
     # local time and read in UTC is silently an hour wrong for half the year.
     defaultLocation: Europe/London
     schedules:
+      # WHICH KIND this entry is. Required, and never inferred from the fields:
+      # an entry that says `intercept` and carries a `hostname` is refused at
+      # startup rather than quietly doing half of what it says.
       - name: offhours
+        type: intercept
         workload: checkout-api
         namespace: shop
         # Port identifier on the intercepted workload: a service port name or
@@ -79,6 +108,31 @@ data:
           # Anything longer than a day needs a duration instead: Friday evening
           # straight through to Monday morning is ONE window, not three, because
           # `days` are the days a window OPENS on, never the days it covers.
+          - days: [Fri]
+            start: "18:32"
+            duration: 60h49m
+      # A DNS-redirect window, and the same PLACEHOLDER convention: this
+      # hostname is fictional, like `shop` and `checkout-api` above. While it is
+      # open the line
+      #
+      #   10.42.0.9 dev-db.example.internal # agentic-preview:db-offhours
+      #
+      # is added to the configured ConfigMap key, and removed when it closes.
+      - name: db-offhours
+        type: dns
+        # The name overridden while the window is open.
+        hostname: dev-db.example.internal
+        # Where it points, as a LITERAL IP. Not a Service name: resolving one
+        # would put a Kubernetes lookup - and a way for it to fail at 18:32
+        # with nobody watching - on the path of the one operation that must not
+        # be fragile. To point at a Service, write its ClusterIP down here.
+        redirectTo: 10.42.0.9
+        # The windows are the same machinery, read the same way, in the same
+        # zone. There is one implementation of them for both kinds.
+        windows:
+          - days: [Mon, Tue, Wed, Thu]
+            start: "18:32"
+            end: "07:21"
           - days: [Fri]
             start: "18:32"
             duration: 60h49m

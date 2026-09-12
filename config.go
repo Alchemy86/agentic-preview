@@ -103,6 +103,18 @@ type config struct {
 	// is the real bound on that exposure. Raising it trades traffic held for
 	// gRPC calls saved; the calls are one GetIntercept per schedule.
 	scheduleCheckInterval time.Duration
+
+	// dnsConfigMapNamespace, dnsConfigMapName and dnsConfigMapKey name the ONE
+	// ConfigMap key a DNS-redirect schedule writes its hosts line into. There
+	// is no default for the first two and a declared DNS schedule without them
+	// is fatal at boot: the real target in a cluster is usually
+	// kube-system/coredns-custom, and defaulting to it would make "I declared a
+	// window" and "I edited the cluster's resolver" the same act. The key
+	// defaults to host.override, which is CoreDNS-custom convention and names
+	// nothing on its own.
+	dnsConfigMapNamespace string
+	dnsConfigMapName      string
+	dnsConfigMapKey       string
 }
 
 func loadConfig() (*config, error) {
@@ -122,6 +134,10 @@ func loadConfig() (*config, error) {
 
 		schedulePath:          strings.TrimSpace(os.Getenv("SCHEDULE_FILE")),
 		scheduleCheckInterval: envDuration("SCHEDULE_CHECK_INTERVAL", 30*time.Second),
+
+		dnsConfigMapNamespace: strings.TrimSpace(os.Getenv("SCHEDULE_DNS_CONFIGMAP_NAMESPACE")),
+		dnsConfigMapName:      strings.TrimSpace(os.Getenv("SCHEDULE_DNS_CONFIGMAP_NAME")),
+		dnsConfigMapKey:       env("SCHEDULE_DNS_CONFIGMAP_KEY", "host.override"),
 	}
 
 	if c.managerAddr == "" {
@@ -154,6 +170,22 @@ func loadConfig() (*config, error) {
 	if c.scheduleCheckInterval <= 0 {
 		return nil, fmt.Errorf("SCHEDULE_CHECK_INTERVAL must be positive")
 	}
+
+	// Where a DNS-redirect schedule may write is checked here rather than in
+	// dns.go for the same reason the schedules themselves are compiled at
+	// boot: a window that opens at 18:32 and discovers then that nobody told it
+	// which ConfigMap to edit is the failure this whole mode is built against.
+	if c.hasDNSSchedule() {
+		if c.dnsConfigMapNamespace == "" || c.dnsConfigMapName == "" {
+			return nil, fmt.Errorf("a DNS-redirect schedule is declared, so SCHEDULE_DNS_CONFIGMAP_NAMESPACE and "+
+				"SCHEDULE_DNS_CONFIGMAP_NAME are required: they name the ConfigMap whose %q key the hosts line "+
+				"is written into. There is no default - in a cluster this is usually kube-system/coredns-custom, "+
+				"and pointing at it is a decision to make out loud", c.dnsConfigMapKey)
+		}
+		if c.dnsConfigMapKey == "" {
+			return nil, fmt.Errorf("SCHEDULE_DNS_CONFIGMAP_KEY must name a key in the ConfigMap")
+		}
+	}
 	return c, nil
 }
 
@@ -166,6 +198,17 @@ func (c *config) scheduledNames() map[string]bool {
 		out[s.spec.Name] = true
 	}
 	return out
+}
+
+// hasDNSSchedule reports whether any declared schedule redirects a DNS name,
+// which is what makes the SCHEDULE_DNS_CONFIGMAP_* settings required.
+func (c *config) hasDNSSchedule() bool {
+	for _, s := range c.schedules {
+		if s.kind == kindDNS {
+			return true
+		}
+	}
+	return false
 }
 
 // namespaceAllowed reports whether ns is one agentic-preview may intercept in.

@@ -52,6 +52,7 @@ func TestMeasuredOffHoursWindow(t *testing.T) {
 defaultLocation: Europe/London
 schedules:
   - name: offhours
+    type: intercept
     workload: checkout-api
     namespace: shop
     port: "8443"
@@ -118,6 +119,7 @@ func TestWindowEdges(t *testing.T) {
 	scheds := compile(t, `
 schedules:
   - name: daytime
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -126,6 +128,7 @@ schedules:
         start: "09:00"
         end:   "17:00"
   - name: allweekend
+    type: intercept
     workload: pricing
     namespace: shop
     targetService: stub
@@ -199,6 +202,7 @@ func TestScheduleRefusals(t *testing.T) {
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: coredns
     namespace: kube-system
     targetService: stub.shop
@@ -211,6 +215,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: anything.kube-system
@@ -221,11 +226,13 @@ schedules:
 		yaml: `
 schedules:
   - name: one
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
     windows: [{days: [Mon], start: "18:00", end: "19:00"}]
   - name: two
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -236,11 +243,13 @@ schedules:
 		yaml: `
 schedules:
   - name: dup
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
     windows: [{days: [Mon], start: "18:00", end: "19:00"}]
   - name: dup
+    type: intercept
     workload: pricing
     namespace: shop
     targetService: stub
@@ -251,6 +260,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
@@ -260,6 +270,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -270,6 +281,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -280,6 +292,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -290,6 +303,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -300,6 +314,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -310,6 +325,7 @@ schedules:
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -322,10 +338,122 @@ schedules:
 schedules: []`,
 		wantErr: "declares no schedules",
 	}, {
+		// The type is DECLARED, never inferred from which fields are filled
+		// in. There is more than one kind now, so an entry that does not say
+		// which it is is a question, and guessing the older kind is how a DNS
+		// schedule written without a type gets read as an intercept with no
+		// workload rather than as the thing it is.
+		name: "REFUSED: no type at all",
+		yaml: `
+schedules:
+  - name: s
+    workload: checkout-api
+    namespace: shop
+    targetService: stub
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "type is required",
+	}, {
+		name: "REFUSED: a type that is not a kind of schedule",
+		yaml: `
+schedules:
+  - name: s
+    type: sql
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: `type "sql" is not a kind of schedule`,
+	}, {
+		// The mixed shapes, in both directions. An entry carrying both was
+		// written by somebody who believed it would do both, and whichever
+		// half won silently would be the one they were not thinking about.
+		name: "REFUSED: an intercept schedule carrying DNS-mode fields",
+		yaml: `
+schedules:
+  - name: s
+    type: intercept
+    workload: checkout-api
+    namespace: shop
+    targetService: stub
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "carries the DNS-mode field(s) hostname/redirectTo",
+	}, {
+		name: "REFUSED: a DNS schedule carrying intercept-mode fields",
+		yaml: `
+schedules:
+  - name: s
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    workload: checkout-api
+    namespace: shop
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "carries the intercept-mode field(s) workload/namespace",
+	}, {
+		name: "REFUSED: a DNS schedule with neither of its own fields",
+		yaml: `
+schedules:
+  - name: s
+    type: dns
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "hostname is required",
+	}, {
+		name: "REFUSED: a DNS schedule with a hostname and nowhere to point it",
+		yaml: `
+schedules:
+  - name: s
+    type: dns
+    hostname: dev-sql.example.internal
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "redirectTo is required",
+	}, {
+		// redirectTo is a literal address on purpose: a Service name would put
+		// a Kubernetes lookup, and a way for it to fail at 18:32 with nobody
+		// watching, on the path of the one operation that must not be fragile.
+		name: "REFUSED: redirectTo as a name rather than an address",
+		yaml: `
+schedules:
+  - name: s
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: sql-stub.previews.svc.cluster.local
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "must be a literal IP address, not a name",
+	}, {
+		name: "REFUSED: a hostname that is not a DNS name",
+		yaml: `
+schedules:
+  - name: s
+    type: dns
+    hostname: "not a hostname"
+    redirectTo: 10.42.0.9
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]`,
+		wantErr: "is not a DNS name",
+	}, {
+		// The DNS kind's counterpart of "two schedules on one workload": two
+		// hosts lines for one name resolve to whichever CoreDNS read first, so
+		// the second one is silently nothing.
+		name: "REFUSED: two schedules overriding one hostname",
+		yaml: `
+schedules:
+  - name: one
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]
+  - name: two
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.10
+    windows: [{days: [Tue], start: "18:00", end: "19:00"}]`,
+		wantErr: "both override the hostname dev-sql.example.internal",
+	}, {
 		name: "REFUSED: a typo in a field name, rather than ignoring it",
 		yaml: `
 schedules:
   - name: s
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetServices: stub
@@ -354,6 +482,7 @@ func TestGlobalInterceptHasNoHeaderFilters(t *testing.T) {
 	sc := compile(t, `
 schedules:
   - name: offhours
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -391,6 +520,7 @@ func TestModeConflictIsRefusedBothWays(t *testing.T) {
 	sc := compile(t, `
 schedules:
   - name: offhours
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -456,6 +586,7 @@ func TestScheduledInterceptIgnoresTheExpirySweep(t *testing.T) {
 	sc := compile(t, `
 schedules:
   - name: offhours
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -495,6 +626,7 @@ func TestNextChange(t *testing.T) {
 defaultLocation: Europe/London
 schedules:
   - name: offhours
+    type: intercept
     workload: checkout-api
     namespace: shop
     targetService: stub
@@ -513,5 +645,100 @@ schedules:
 	when, _ = sc.nextChange(time.Date(2026, 9, 14, 23, 0, 0, 0, loc))
 	if want := time.Date(2026, 9, 15, 7, 21, 0, 0, loc); !when.Equal(want) {
 		t.Fatalf("next change %s, want %s", when.In(loc), want)
+	}
+}
+
+// TestDNSScheduleSharesTheWindowMachinery is the DNS kind's schema test, and
+// the point of it is what it does NOT have to prove again: the days, the
+// overnight wrap, the duration and the zone are the same compiled window the
+// intercept kind uses, because there is one implementation of them. What is
+// new here is the target - a hostname and a literal address - and that the two
+// kinds sit in one file without either knowing about the other.
+func TestDNSScheduleSharesTheWindowMachinery(t *testing.T) {
+	scheds := compile(t, `
+defaultLocation: Europe/London
+schedules:
+  - name: offhours
+    type: intercept
+    workload: checkout-api
+    namespace: shop
+    port: "8443"
+    targetService: auth-stub.previews
+    targetPort: 8443
+    windows:
+      - days: [Mon, Tue, Wed, Thu]
+        start: "18:32"
+        end:   "07:21"
+  - name: sql-offhours
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    windows:
+      - days: [Mon, Tue, Wed, Thu]
+        start: "18:32"
+        end:   "07:21"
+      - days: [Fri]
+        start: "18:32"
+        duration: 60h49m
+`)
+	if len(scheds) != 2 {
+		t.Fatalf("want 2 schedules, got %d", len(scheds))
+	}
+	// loadSchedules sorts by name, so the DNS one is second.
+	intercept, dns := scheds[0], scheds[1]
+	if intercept.kind != kindIntercept || dns.kind != kindDNS {
+		t.Fatalf("kinds are %s and %s", intercept.kind, dns.kind)
+	}
+	if dns.hostname != "dev-sql.example.internal" || dns.redirectTo != "10.42.0.9" {
+		t.Fatalf("DNS target compiled as %s -> %s", dns.hostname, dns.redirectTo)
+	}
+	// A DNS schedule raises no intercept, so it has no manager-side name and no
+	// forward target - reporting empty ones would invite somebody to go looking
+	// for an intercept that does not exist.
+	if dns.interceptName != "" || dns.targetService != "" || dns.targetPort != 0 {
+		t.Fatalf("a DNS schedule carries intercept fields: %+v", dns)
+	}
+
+	loc := london(t)
+	when := func(s string) time.Time {
+		t.Helper()
+		ts, err := time.ParseInLocation("2006-01-02 15:04", s, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+	// Same window text, same answers, in both kinds - which is the whole claim
+	// of reusing the machinery rather than writing a second scheduler.
+	for _, c := range []struct {
+		at   string
+		want bool
+	}{
+		{"2026-09-14 18:31", false},
+		{"2026-09-14 18:32", true},
+		{"2026-09-15 07:21", false},
+	} {
+		if got := dns.active(when(c.at)); got != c.want {
+			t.Errorf("dns.active(%s) = %v, want %v", c.at, got, c.want)
+		}
+		if got := intercept.active(when(c.at)); got != c.want {
+			t.Errorf("intercept.active(%s) = %v, want %v", c.at, got, c.want)
+		}
+	}
+	// The weekend-long window is the DNS one's alone, and it still works.
+	if !dns.active(when("2026-09-19 14:00")) {
+		t.Error("the Friday-evening window does not cover Saturday afternoon")
+	}
+	// A trailing dot on a hostname is the same name; it is normalised rather
+	// than written into the hosts line as a second spelling of it.
+	if got := compile(t, `
+schedules:
+  - name: dotted
+    type: dns
+    hostname: dev-sql.example.internal.
+    redirectTo: 10.42.0.9
+    windows: [{days: [Mon], start: "18:00", end: "19:00"}]
+`)[0].hostname; got != "dev-sql.example.internal" {
+		t.Errorf("trailing dot not normalised: %q", got)
 	}
 }

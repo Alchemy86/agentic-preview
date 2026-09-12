@@ -54,7 +54,7 @@ request. The measured numbers and failure modes are in
 - **`hack/kubectl-agentic_preview` is a client of the HTTP API and must stay in step with
   it.** It is the `kubectl agentic-preview` plugin (kubectl maps the underscore to a
   space), a shell wrapper over `kubectl … --raw` against the API server's service proxy —
-  no Go client, no credentials of its own. It currently covers all six endpoints. Adding
+  no Go client, no credentials of its own. It currently covers all seven endpoints. Adding
   an endpoint to `api.go` means adding a subcommand or deciding in the open not to; the
   same goes for a new field on `PreviewRequest` and a flag on `up`.
   [`docs/PLUGIN.md`](docs/PLUGIN.md) is the page, and `--help` is the command reference —
@@ -68,6 +68,22 @@ request. The measured numbers and failure modes are in
   is off unless `SCHEDULE_FILE` is set, and it must stay that way: nothing without a declared
   window may behave differently. [`docs/SCHEDULES.md`](docs/SCHEDULES.md) is the page and
   carries the measured recovery numbers.
+- **A schedule is one of TWO kinds and says which in `type:`; the windows are shared, the
+  targets are not.** `type: intercept` is the above; `type: dns` writes one tagged `hosts`
+  line into a ConfigMap (`dns.go`) for a dependency with no workload to attach to. The kind
+  is never inferred from which fields are present - `scheduleKindOf` refuses a mismatch, and
+  the chart template refuses the same one at render time, so the two must move together.
+  Where the DNS kind may write is `SCHEDULE_DNS_CONFIGMAP_*` with NO default, and the RBAC
+  for it is commented out in `deploy/rbac.yaml` on purpose: that ConfigMap is outside
+  `ALLOWED_NAMESPACES`, which bounds interception and forwarding and says nothing about the
+  resolver. A missing permission must stay an alarm, never a crash - `dns_test.go` is the
+  executable form of that and of the coexistence and drift behaviour.
+- **`POST /schedules/{name}/override` forces a declared window open or closed and must never
+  become a way to declare one.** It changes exactly one thing, `desiredOpen`; everything else
+  in the loop still runs, which is why a forced-open target is still health-checked, still
+  drift-checked and still re-raised. It lives on the same surface as `POST /previews`
+  deliberately - a second endpoint elsewhere would undo the property the schedules page
+  claims - and in memory deliberately, so a restart returns to what the file says.
 - **README.md is the front page, not the manual.** It keeps the pitch, the feature map,
   install, the API table, and the short forms of the non-goals and the limits — everything
   else lives as a page under `docs/`, indexed by [`docs/README.md`](docs/README.md). Detail

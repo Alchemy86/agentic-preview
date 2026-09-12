@@ -42,21 +42,59 @@ type scheduleState struct {
 	// Raises counts successful CreateIntercepts, ReRaises the ones that
 	// followed a health check finding the intercept gone. A ReRaise count that
 	// climbs is the signal that something is killing intercepts underneath us.
+	// For a DNS-redirect schedule the two count the same thing about the hosts
+	// line: Raises the times it was written because the window opened, ReRaises
+	// the times the drift check found it gone or wrong and put it back. A
+	// climbing ReRaises means the same thing in both kinds - something is
+	// fighting the controller.
 	Raises   int `json:"raises"`
 	ReRaises int `json:"reRaises"`
 
 	raisedAt  time.Time
 	lastAlarm time.Time
+	// applied is the DNS kind's "is it held", the counterpart of the registry
+	// entry an intercept schedule looks itself up by. It is the controller's
+	// belief, checked against the ConfigMap on every tick rather than trusted.
+	applied bool
+	// swept is whether this process has ever managed to establish what the
+	// ConfigMap actually holds for this DNS schedule - by writing the line, or
+	// by looking for a stale one and either removing it or finding none. Until
+	// it is true a shut window keeps sweeping on every tick, because the thing
+	// being ruled out is a live redirect nobody declared and one failed API
+	// call is not a reason to stop ruling it out.
+	swept bool
 }
 
 // ScheduleStatus is one schedule as the API reports it.
+//
+// The kind-specific fields are omitempty in both directions on purpose: a DNS
+// schedule has no workload, port or telepresence intercept, and reporting empty
+// intercept fields on it would invite a reader to look for the intercept that
+// is not there. What both kinds do report is the same four things - target,
+// open/up, since/nextChange, and problem.
 type ScheduleStatus struct {
-	Name      string `json:"name"`
-	Workload  string `json:"workload"`
-	Namespace string `json:"namespace"`
-	Port      string `json:"port"`
-	Target    string `json:"target"`
-	Windows   string `json:"windows"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+
+	// Intercept-kind only.
+	Workload  string `json:"workload,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Port      string `json:"port,omitempty"`
+
+	// DNS-kind only.
+	Hostname   string `json:"hostname,omitempty"`
+	RedirectTo string `json:"redirectTo,omitempty"`
+
+	// Target is where the diversion points: a Service and port for an
+	// intercept, and for a DNS redirect the ConfigMap key the line is written
+	// into, which is the thing an operator needs in order to go and look.
+	Target  string `json:"target"`
+	Windows string `json:"windows"`
+
+	// Override is the manual forcing, when there is one. Absent is the normal
+	// case: the window alone decides.
+	Override *overrideState `json:"override,omitempty"`
+
 	scheduleState
 }
 
@@ -115,6 +153,10 @@ func (s *Server) reconcileSchedules(ctx context.Context, now time.Time) {
 		if ctx.Err() != nil {
 			return
 		}
+		if sc.kind == kindDNS {
+			s.reconcileDNSSchedule(ctx, sc, now)
+			continue
+		}
 		s.reconcileSchedule(ctx, sc, now)
 	}
 }
@@ -122,7 +164,7 @@ func (s *Server) reconcileSchedules(ctx context.Context, now time.Time) {
 // reconcileSchedule brings one schedule's intercept into line with the clock.
 func (s *Server) reconcileSchedule(ctx context.Context, sc *schedule, now time.Time) {
 	st := s.scheduleStateFor(sc.spec.Name)
-	want := sc.active(now)
+	want, forced := s.desiredOpen(sc, now)
 	_, held := s.reg.get(sc.key())
 
 	// Since is zero only on the very first tick, where want is not a change to
@@ -134,10 +176,10 @@ func (s *Server) reconcileSchedule(ctx context.Context, sc *schedule, now time.T
 		switch {
 		case first:
 		case want:
-			logf("schedule %s: window OPEN - raising a global intercept on %s.%s",
-				sc.spec.Name, sc.spec.Workload, sc.spec.Namespace)
+			logf("schedule %s: %s - raising a global intercept on %s.%s",
+				sc.spec.Name, openedBy(forced), sc.spec.Workload, sc.spec.Namespace)
 		default:
-			logf("schedule %s: window CLOSED", sc.spec.Name)
+			logf("schedule %s: %s", sc.spec.Name, closedBy(forced))
 		}
 	}
 	if st.NextChange.IsZero() || !st.NextChange.After(now) {
@@ -368,19 +410,26 @@ func (s *Server) putScheduleState(name string, st *scheduleState) {
 // ScheduleStatuses is every declared schedule with what the controller last
 // made of it, for GET /schedules.
 func (s *Server) ScheduleStatuses() []ScheduleStatus {
+	now := time.Now()
 	out := make([]ScheduleStatus, 0, len(s.cfg.schedules))
 	for _, sc := range s.cfg.schedules {
 		st := s.scheduleStateFor(sc.spec.Name)
-		out = append(out, ScheduleStatus{
-			Name:      sc.spec.Name,
-			Workload:  sc.spec.Workload,
-			Namespace: sc.spec.Namespace,
-			Port:      sc.portID,
-			Target:    fmt.Sprintf("%s:%d", sc.target(), sc.targetPort),
-			Windows:   sc.describe(),
+		status := ScheduleStatus{
+			Name:    sc.spec.Name,
+			Kind:    sc.kind.String(),
+			Windows: sc.describe(),
 			//nolint:govet // a copy of the state is exactly what is wanted here
 			scheduleState: *st,
-		})
+			Override:      s.overrideFor(sc.spec.Name, now),
+		}
+		if sc.kind == kindDNS {
+			status.Hostname, status.RedirectTo = sc.hostname, sc.redirectTo
+			status.Target = s.dnsTargetRef()
+		} else {
+			status.Workload, status.Namespace, status.Port = sc.spec.Workload, sc.spec.Namespace, sc.portID
+			status.Target = fmt.Sprintf("%s:%d", sc.target(), sc.targetPort)
+		}
+		out = append(out, status)
 	}
 	return out
 }

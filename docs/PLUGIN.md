@@ -107,11 +107,16 @@ it: `workId` is required there, and is never parsed by the service.
 
 ## Staying in step
 
-The plugin covers the whole API surface — six endpoints across `up`, `list`, `down`,
-`status` and `schedules`. A new endpoint is a new subcommand, or a decided and stated reason
-not to add one; see [`AGENTS.md`](../AGENTS.md).
+The plugin covers the whole API surface — seven endpoints across `up`, `list`, `down`,
+`status`, `schedules` and `override`. A new endpoint is a new subcommand, or a decided and
+stated reason not to add one; see [`AGENTS.md`](../AGENTS.md).
 
-`schedules` is read-only because the endpoint is: a
-[scheduled intercept](SCHEDULES.md) is declared in the service's config, not raised from a
-command line, because it diverts all of a workload's traffic rather than one header's worth.
-There is deliberately no `up --global` for the same reason.
+`schedules` is read-only because the endpoint is: a [schedule](SCHEDULES.md) is declared in
+the service's config, not raised from a command line, because it diverts all of a workload's
+traffic — or a whole DNS name — rather than one header's worth. There is deliberately no
+`up --global` for the same reason.
+
+`override` forces a schedule that is ALREADY DECLARED open or closed now, and cannot create
+one. It is here rather than on a surface of its own precisely because of the paragraph above
+this one: where you put the Service is the control, and a second door would be a second
+place to have to put it.

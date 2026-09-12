@@ -62,12 +62,30 @@ $PROG - header-routed preview environments, from the command line.
         disconnectedNamespaces can be intercepted in and never tunnelled to.
 
     schedules
-        Scheduled, HEADERLESS intercepts: every window declared in the
-        service's config, whether it is open, whether its intercept is up, and
-        the problem if it is open and is not. Read-only - a window is declared
-        in config, never raised from here, because it diverts ALL of a
-        workload's traffic and not one header's worth. Empty output means
-        nothing is scheduled, which is the normal case.
+        Every window declared in the service's config: whether it is open,
+        whether it is up, and the problem if it is open and is not. Both kinds
+        are listed - an `intercept` schedule diverts a whole workload, a `dns`
+        one redirects a DNS name - and each reports the fields its own kind
+        has. Empty output means nothing is scheduled, which is the normal case.
+
+    override <name> open|closed|auto [--for <duration>] [--reason <text>]
+        Force one DECLARED schedule open or closed right now, without waiting
+        for its window - the same on-demand lever a preview has. "auto" hands
+        it back to its windows.
+
+        It is a layer on top of the reconcile loop, never a replacement: the
+        service keeps health-checking, drift-checking and re-applying exactly
+        as it does for a window edge. The change lands on the next check
+        interval, not instantly.
+
+        An override lives in memory and does NOT survive a restart of the
+        service, on purpose: the schedule is the durable, reviewable thing and
+        it lives in a file in a repository. Without --for it lasts until it is
+        cleared, and is reported by `schedules` for as long as it does.
+
+        A schedule cannot be CREATED from here, only forced: a window declared
+        over HTTP would be a global intercept anybody able to reach the Service
+        could conjure on a workload nobody asked about.
 
   FLAGS for up
     -n, --namespace <ns>      Namespace of the workload being previewed.
@@ -329,6 +347,48 @@ cmd_schedules() {
   api get "$(proxy)/schedules"
 }
 
+# cmd_override forces one declared schedule open or closed now. It goes through
+# the same service proxy as everything else here, which is the point: the
+# property that a global intercept cannot be flipped by anything merely able to
+# reach the Service is a property of this door, and a second one would take it
+# away.
+cmd_override() {
+  local name='' state='' duration='' reason=''
+  [ $# -ge 2 ] || die "usage: override <schedule> open|closed|auto [--for <duration>] [--reason <text>]"
+  name=$1; state=$2; shift 2
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --for|-f)    duration=${2:-}; [ -n "$duration" ] || die "--for needs a duration, such as 2h or 90m"; shift 2 ;;
+      --reason|-r) reason=${2:-}; [ -n "$reason" ] || die "--reason needs some text"; shift 2 ;;
+      -*)          die "unknown flag for override: $1" ;;
+      *)           die "override takes a schedule name and a state, then flags; got an extra \"$1\"" ;;
+    esac
+  done
+  case $name in
+    */*|'') die "a schedule name is required, and it cannot contain \"/\": it is sent as a URL path segment" ;;
+  esac
+  case $state in
+    open|closed) ;;
+    auto|clear|none) state=auto ;;
+    *) die "state \"$state\" is not open, closed or auto" ;;
+  esac
+  [ "$state" != auto ] || [ -z "$duration" ] || die "--for makes no sense with auto: it clears the override"
+
+  local body="{\"state\":$(json_str "$state")"
+  [ -z "$duration" ] || body="$body,\"duration\":$(json_str "$duration")"
+  [ -z "$reason" ]   || body="$body,\"reason\":$(json_str "$reason")"
+  body="$body}"
+
+  MISSING_HINT="No schedule is named \"$name\". \"$PROG schedules\" lists the ones there are."
+  printf '%s' "$body" | api create "$(proxy)/schedules/$name/override"
+  if [ "$state" = auto ]; then
+    note "Override cleared: $name follows its declared windows again."
+  else
+    note "$name is forced $state until $([ -n "$duration" ] && printf '%s from now' "$duration" || printf 'you clear it')."
+    note "Hand it back with:  $PROG override $name auto"
+  fi
+}
+
 # --- dispatch -------------------------------------------------------------
 
 command -v kubectl >/dev/null 2>&1 || die "kubectl is not on PATH, and this plugin is a wrapper around it"
@@ -352,6 +412,7 @@ case ${1:-} in
   down|drop)      shift; cmd_down "$@" ;;
   status)         shift; cmd_status "$@" ;;
   schedules|sched) shift; cmd_schedules "$@" ;;
+  override)       shift; cmd_override "$@" ;;
   '')             usage; exit 0 ;;
-  *)              die "unknown command: $1. There are five: up, list, down, status, schedules. Try: $PROG --help" ;;
+  *)              die "unknown command: $1. There are six: up, list, down, status, schedules, override. Try: $PROG --help" ;;
 esac

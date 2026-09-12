@@ -115,6 +115,22 @@ spec:
             # to the workload, and nobody is awake at 03:00 to notice.
             # - name: SCHEDULE_CHECK_INTERVAL
             #   value: 30s
+            # REQUIRED IF, AND ONLY IF, a `type: dns` schedule is declared -
+            # and the shipped schedules.yaml declares one (`db-offhours`). The
+            # three name the ONE ConfigMap key such a schedule writes its hosts
+            # line into. There is no default for any of them and a declared DNS
+            # schedule without the first two is FATAL AT BOOT, so uncommenting
+            # SCHEDULE_FILE while leaving these commented is a CrashLoopBackOff:
+            # either uncomment all three or drop the `type: dns` entry from
+            # schedules.yaml. Pointing at the cluster's resolver is a decision
+            # to make out loud, and the permission for it is a separate grant -
+            # see the commented Role at the end of rbac.yaml.
+            # - name: SCHEDULE_DNS_CONFIGMAP_NAMESPACE
+            #   value: kube-system
+            # - name: SCHEDULE_DNS_CONFIGMAP_NAME
+            #   value: coredns-custom
+            # - name: SCHEDULE_DNS_CONFIGMAP_KEY
+            #   value: host.override
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -94,6 +94,10 @@ type Server struct {
 	// sched is the schedule controller's own memory, keyed by schedule name.
 	// Empty and untouched when no schedule is declared.
 	sched *scheduleStates
+	// over holds the manual on-demand overrides, keyed by schedule name. It is
+	// separate from sched because the two have different writers: the loop owns
+	// sched and rewrites it every tick, and the API owns this.
+	over *overrides
 }
 
 func NewServer(cfg *config) *Server {
@@ -101,6 +105,7 @@ func NewServer(cfg *config) *Server {
 		cfg:      cfg,
 		reg:      newRegistry(),
 		sched:    newScheduleStates(),
+		over:     newOverrides(),
 		sessions: map[string]*mgrSession{},
 		saved:    map[string]string{},
 	}

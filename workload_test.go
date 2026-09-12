@@ -23,11 +23,36 @@ type fakeKube struct {
 	deployments []appsv1.Deployment
 	services    []corev1.Service
 	pods        []corev1.Pod
+	configMaps  []corev1.ConfigMap
 
 	deletedDeployments []string
 	deletedServices    []string
 	created            []string
 	updated            []string
+}
+
+// The two ConfigMap methods exist because kubeAPI has them for DNS-redirect
+// schedules. Nothing in the workload path touches a ConfigMap; the DNS path is
+// tested against client-go's own fake clientset in dns_test.go, through the
+// real clusterKube, so that what it proves is the code that actually runs.
+func (f *fakeKube) getConfigMap(_ context.Context, ns, name string) (*corev1.ConfigMap, error) {
+	for i := range f.configMaps {
+		if f.configMaps[i].Namespace == ns && f.configMaps[i].Name == name {
+			return f.configMaps[i].DeepCopy(), nil
+		}
+	}
+	return nil, notFound("configmaps", name)
+}
+
+func (f *fakeKube) updateConfigMap(_ context.Context, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	f.updated = append(f.updated, "configmap/"+cm.Name+"."+cm.Namespace)
+	for i := range f.configMaps {
+		if f.configMaps[i].Namespace == cm.Namespace && f.configMaps[i].Name == cm.Name {
+			f.configMaps[i] = *cm.DeepCopy()
+			return cm, nil
+		}
+	}
+	return nil, notFound("configmaps", cm.Name)
 }
 
 func notFound(resource, name string) error {

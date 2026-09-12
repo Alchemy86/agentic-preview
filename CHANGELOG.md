@@ -38,6 +38,43 @@
   the schedule ConfigMap so editing a window rolls the pod. `deploy/` grows `schedules.yaml`,
   deliberately not applied, with the three edits that switch it on in its header.
 
+- **A second kind of schedule: `type: dns`.** An intercept needs a workload, so the mode above
+  can only divert something that runs in the cluster. A dependency with no pod, Deployment or
+  Service anywhere — a managed database behind Private Link, an appliance — has exactly one
+  interception point that reaches it, the resolver. A `type: dns` schedule takes it: while its
+  window is open one tagged `hosts` line (`10.42.0.9 name # agentic-preview:<schedule>`) is
+  written into a CoreDNS-style ConfigMap, and on close exactly that line is removed. The
+  windows, the zone, the reconcile loop, the drift check and the alarms are the SAME
+  machinery — it is a second target for one scheduler, not a second scheduler.
+  - Every entry now declares `type: intercept` or `type: dns`, and an existing schedule file
+    needs `type: intercept` added to each of its entries. The kind is never inferred from
+    which fields are filled in, and an entry that says one kind and carries the other's
+    fields is refused at boot and at chart-render time, rather than quietly doing half of
+    what it says.
+  - `redirectTo` is a literal IP, not a Service name: resolving a name would put a Kubernetes
+    lookup, and a way for it to fail at 18:32 with nobody watching, on the path of the one
+    operation that must not be fragile.
+  - Where it writes is configuration and has **no default** —
+    `SCHEDULE_DNS_CONFIGMAP_NAMESPACE`/`_NAME`/`_KEY`, chart `scheduleDNSConfigMap`. In a
+    cluster that is usually `kube-system/coredns-custom`, and defaulting to it would make
+    declaring a window and editing the cluster's resolver the same act. The permission for it
+    is a separate grant neither `deploy/` nor the chart creates; `deploy/rbac.yaml` carries
+    the Role commented out. Without it the schedule alarms and `problem` names the ConfigMap
+    it may not write — nothing panics and nothing crash-loops.
+  - The drift check is the reason this is not a pair of CronJobs: while the window is open the
+    line is re-read every `SCHEDULE_CHECK_INTERVAL`, and a line that has been reverted or
+    rewritten is put back and counted in `reRaises`. A steady tick issues no write at all, so
+    the resolver is not reloaded every 30s. Verified against CoreDNS 1.11.3: the trailing tag
+    comment is ignored, `hosts` answers over `forward` regardless of the order the Corefile
+    writes them in, and a neighbouring untagged entry is untouched.
+- **Forcing a window on demand**, either kind: `kubectl agentic-preview override <name>
+  open|closed|auto [--for 2h]`, or `POST /schedules/{name}/override`. It is a layer on top of
+  the reconcile loop and not a replacement — a forced-open intercept that dies is still
+  re-raised, a forced-open redirect that drifts is still re-applied and counted. It arrives on
+  the same authenticated surface a preview is raised on, it cannot CREATE a schedule, and it
+  lives in memory rather than surviving a restart: the schedule is the durable, reviewable
+  thing, and an override is an intervention somebody is present for.
+
 Nothing about a workload with no declared window changes: with `SCHEDULE_FILE` unset the
 controller returns on its first line and no other code path is reached.
 

@@ -14,6 +14,12 @@ import (
 var (
 	nameRE   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	workIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+	// hostnameRE is nameRE's multi-label form: a DNS name a schedule may
+	// override. It is deliberately stricter than what a resolver would accept -
+	// no leading dot, no empty label, no underscore - because this name is
+	// written into a CoreDNS hosts line, where a malformed entry is a Corefile
+	// CoreDNS refuses to load rather than one name that does not resolve.
+	hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 )
 
 // maxPreviewReplicas caps what one request may ask for. A preview is something

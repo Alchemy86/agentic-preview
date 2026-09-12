@@ -96,6 +96,21 @@ spec:
             # values.yaml for why the second of those is the reason it is short.
             - name: SCHEDULE_CHECK_INTERVAL
               value: {{ .Values.scheduleCheckInterval | quote }}
+            {{- if .Values.scheduleDNSConfigMap.name }}
+            # The ONE ConfigMap key a `type: dns` schedule writes its hosts line
+            # into. There is no default for it anywhere - in the chart, or in
+            # the service, which refuses to start if a DNS schedule is declared
+            # without it. Pointing at the cluster's resolver is a decision to
+            # make out loud, and the permission for it is a separate grant the
+            # chart does not create either: see scheduleDNSConfigMap in
+            # values.yaml.
+            - name: SCHEDULE_DNS_CONFIGMAP_NAMESPACE
+              value: {{ .Values.scheduleDNSConfigMap.namespace | quote }}
+            - name: SCHEDULE_DNS_CONFIGMAP_NAME
+              value: {{ .Values.scheduleDNSConfigMap.name | quote }}
+            - name: SCHEDULE_DNS_CONFIGMAP_KEY
+              value: {{ .Values.scheduleDNSConfigMap.key | quote }}
+            {{- end }}
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false

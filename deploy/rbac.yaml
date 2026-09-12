@@ -191,3 +191,53 @@ subjects:
   - kind: ServiceAccount
     name: agentic-preview
     namespace: agentic-preview
+---
+# DNS-REDIRECT SCHEDULES need one more permission, and it is DELIBERATELY NOT
+# GRANTED HERE. Uncomment it only if you declare a `type: dns` schedule, and
+# only after reading docs/SCHEDULES.md.
+#
+# That kind of schedule writes one `hosts` line into ONE ConfigMap key, named by
+# SCHEDULE_DNS_CONFIGMAP_NAMESPACE/_NAME/_KEY. In a cluster that ConfigMap is
+# usually kube-system/coredns-custom - a namespace nothing else here touches and
+# which is not in ALLOWED_NAMESPACES, because the fence the rest of this file
+# draws is about intercepting workloads and has nothing to say about the
+# resolver. So this is a separate, deliberate grant with its own blast radius:
+# get and update on the cluster's DNS configuration.
+#
+# `resourceNames` is what keeps it to the one ConfigMap. Leave it in. Without
+# it this is get and update on every ConfigMap in kube-system, which is a very
+# different permission from the one being asked for.
+#
+# Without this grant nothing panics and nothing crash-loops: the schedule
+# alarms, `problem` on GET /schedules says exactly which ConfigMap it may not
+# write, and every other schedule carries on. That is on purpose - a permission
+# gap is a live-environment fact, not a reason to take the process down.
+#
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: Role
+# metadata:
+#   name: agentic-preview-dns
+#   namespace: kube-system
+#   labels:
+#     app: agentic-preview
+# rules:
+#   - apiGroups: [""]
+#     resources: ["configmaps"]
+#     resourceNames: ["coredns-custom"]
+#     verbs: ["get", "update"]
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: agentic-preview-dns
+#   namespace: kube-system
+#   labels:
+#     app: agentic-preview
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: agentic-preview-dns
+# subjects:
+#   - kind: ServiceAccount
+#     name: agentic-preview
+#     namespace: agentic-preview
