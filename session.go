@@ -41,19 +41,39 @@ func (b bearer) GetRequestMetadata(context.Context, ...string) (map[string]strin
 
 func (bearer) RequireTransportSecurity() bool { return false }
 
-// Server holds one manager session and the tunnels that serve every live
-// preview. Exactly one Server exists per process.
+// mgrSession is one client session with the traffic-manager, and it is bound
+// to exactly ONE namespace.
+//
+// That binding is not this service's choice, it is the manager's: a session
+// arrives in the namespace named by ClientInfo.Namespace, and the manager then
+// answers WatchAgentPods for that namespace ALONE - `agentPodNamespaces` with
+// no explicit list falls back to `clientInfo.Namespace`
+// (cmd/traffic/cmd/manager/service.go). So a process holding one session can
+// only ever be told about agent pods in one namespace, however many namespaces
+// it is allowed to intercept in. Holding a session PER namespace is what makes
+// the allow-list mean anything; see the header comment on Run.
+type mgrSession struct {
+	ns   string
+	conn *grpc.ClientConn
+	mc   managerrpc.ManagerClient
+	si   *managerrpc.SessionInfo
+	// token is the session-scoped credential presented to a traffic-agent.
+	// Empty when the manager cannot mint one. It is per session, so an agent
+	// call has to be made with the token of the session that owns it.
+	token string
+}
+
+// Server holds one manager session per allowed namespace and the tunnels that
+// serve every live preview. Exactly one Server exists per process.
 type Server struct {
 	cfg *config
 	reg *registry
 
-	mu      sync.RWMutex
-	conn    *grpc.ClientConn
-	mc      managerrpc.ManagerClient
-	session *managerrpc.SessionInfo
-	// sessionToken is the session-scoped credential presented to a
-	// traffic-agent. Empty when the manager cannot mint one.
-	sessionToken string
+	mu sync.RWMutex
+	// sessions is keyed by namespace. A namespace with no entry has no live
+	// session: either it has not connected yet or its session died and is
+	// being rebuilt. The others are unaffected by that, which is the point.
+	sessions map[string]*mgrSession
 	// managerVersion is reported by the API for diagnosis.
 	managerVersion string
 	agents         *agentPool
@@ -63,18 +83,27 @@ type Server struct {
 	// kubeErr says why, so the refusal can name the reason.
 	kube    kubeAPI
 	kubeErr error
-	// ready is closed once a session exists, so the API can report honestly.
-	connected bool
 	// raiseMu serialises intercept creation: PrepareIntercept provisions the
-	// node-agent Job, and two concurrent Prepares for one workload race.
+	// node-agent Job, and two concurrent Prepares for one workload race. It
+	// stays process-wide rather than per session - the race is over Jobs in
+	// the manager's own namespace, which every session shares.
 	raiseMu sync.Mutex
+	// savedMu guards the recorded session ids, which N session loops write.
+	savedMu sync.Mutex
+	saved   map[string]string
 	// sched is the schedule controller's own memory, keyed by schedule name.
 	// Empty and untouched when no schedule is declared.
 	sched *scheduleStates
 }
 
 func NewServer(cfg *config) *Server {
-	s := &Server{cfg: cfg, reg: newRegistry(), sched: newScheduleStates()}
+	s := &Server{
+		cfg:      cfg,
+		reg:      newRegistry(),
+		sched:    newScheduleStates(),
+		sessions: map[string]*mgrSession{},
+		saved:    map[string]string{},
+	}
 	s.agents = newAgentPool(s)
 	if k, err := newKubeAPI(); err != nil {
 		s.kubeErr = err
@@ -85,29 +114,108 @@ func NewServer(cfg *config) *Server {
 	return s
 }
 
-// state returns the current session and manager client together, so a caller
-// never mixes a session id with a client from a later incarnation.
-func (s *Server) state() (managerrpc.ManagerClient, *managerrpc.SessionInfo, string) {
+// sessionFor returns the live session for a namespace, or nil when that
+// namespace has none. Everything session-scoped goes through it: an intercept,
+// a tunnel and a credential all belong to the session that owns the namespace
+// they are in, and mixing one namespace's session id with another's client is
+// exactly the confusion this type exists to prevent.
+func (s *Server) sessionFor(ns string) *mgrSession {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.mc, s.session, s.sessionToken
+	return s.sessions[ns]
 }
 
-// Run is the supervising loop. Each pass builds a whole session - arrive,
-// credential, watchers - reconciles every registered preview onto it, and then
-// waits for it to fail. Reconnection is therefore not a special case: it is
-// the same code path as the first connection, which is what makes a manager
-// restart survivable (the CLI does the equivalent by re-arriving on
-// codes.NotFound; here the whole session is rebuilt).
+// allSessions returns every live session, in configured namespace order.
+func (s *Server) allSessions() []*mgrSession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*mgrSession, 0, len(s.sessions))
+	for _, ns := range s.cfg.allowedNamespaces {
+		if sess := s.sessions[ns]; sess != nil {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// connectedNamespaces reports which allowed namespaces currently hold a
+// session, and which do not. Both halves are reported by the API: a process
+// serving three namespaces of four is not the same as a healthy one, and the
+// multi-replica bug taught this service that a partial state nobody can see is
+// the shape that goes unnoticed for weeks.
+func (s *Server) connectedNamespaces() (live, missing []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, ns := range s.cfg.allowedNamespaces {
+		if s.sessions[ns] != nil {
+			live = append(live, ns)
+		} else {
+			missing = append(missing, ns)
+		}
+	}
+	return live, missing
+}
+
+// liveSessionIDs is the set of session ids this process currently holds. The
+// orphan sweep needs it to tell one of OUR OWN sessions from a dead
+// predecessor's, which with one session per namespace is no longer answered by
+// "is it the session id I am using right now".
+func (s *Server) liveSessionIDs() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := make(map[string]bool, len(s.sessions))
+	for _, sess := range s.sessions {
+		ids[sess.si.GetSessionId()] = true
+	}
+	return ids
+}
+
+// Run supervises ONE SESSION PER ALLOWED NAMESPACE, concurrently and
+// independently.
+//
+// It is one session per namespace and not one session because of where the
+// manager draws the line. A client session arrives in a single namespace, and
+// `WatchAgentPods` is answered for that namespace alone - so a process holding
+// one session is told about agent pods in one namespace and hears nothing about
+// the rest, however many it is allowed to intercept in. The intercepts in those
+// other namespaces are still created and still go ACTIVE; what never happens is
+// the tunnel, and an ACTIVE intercept with no tunnel HOLDS its traffic rather
+// than failing it over. Measured on a real cluster: with two allowed
+// namespaces, whichever one came first in ALLOWED_NAMESPACES was served and the
+// other one's requests hung, silently, with every status this service reported
+// saying the intercept was up.
+//
+// Each namespace gets its own supervising loop, so a manager relationship that
+// dies in one namespace is rebuilt without touching the others - the same
+// reason the tunnel pool holds a tunnel per pod rather than per workload.
 func (s *Server) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, ns := range s.cfg.allowedNamespaces {
+		wg.Add(1)
+		go func(ns string) {
+			defer wg.Done()
+			s.runNamespace(ctx, ns)
+		}(ns)
+	}
+	wg.Wait()
+}
+
+// runNamespace is the supervising loop for one namespace. Each pass builds a
+// whole session - arrive, credential, watchers - reconciles every registered
+// preview in that namespace onto it, and then waits for it to fail.
+// Reconnection is therefore not a special case: it is the same code path as the
+// first connection, which is what makes a manager restart survivable (the CLI
+// does the equivalent by re-arriving on codes.NotFound; here the whole session
+// is rebuilt).
+func (s *Server) runNamespace(ctx context.Context, ns string) {
 	for ctx.Err() == nil {
-		if err := s.runSession(ctx); err != nil && ctx.Err() == nil {
-			logf("session ended: %v", err)
+		if err := s.runSession(ctx, ns); err != nil && ctx.Err() == nil {
+			logf("session for %s ended: %v", ns, err)
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		logf("reconnecting to the manager in %s", s.cfg.reconnectBackoff)
+		logf("reconnecting to the manager for %s in %s", ns, s.cfg.reconnectBackoff)
 		select {
 		case <-ctx.Done():
 			return
@@ -116,8 +224,8 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-// runSession builds one session and blocks until it dies.
-func (s *Server) runSession(parent context.Context) error {
+// runSession builds one session for one namespace and blocks until it dies.
+func (s *Server) runSession(parent context.Context, ns string) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
@@ -140,19 +248,20 @@ func (s *Server) runSession(parent context.Context) error {
 	}
 	logf("manager %s %s at %s", v.GetName(), v.GetVersion(), s.cfg.managerAddr)
 
-	// A client session is bound to the namespace it arrives in, and the
-	// manager refuses a namespace it does not manage.
+	// A client session is bound to the namespace it arrives in - which is the
+	// whole reason there is one of these per namespace - and the manager
+	// refuses a namespace it does not manage.
 	si, err := mc.ArriveAsClient(ctx, &managerrpc.ClientInfo{
 		Name:      s.cfg.clientName,
-		Namespace: s.cfg.allowedNamespaces[0],
+		Namespace: ns,
 		InstallId: uuid.NewString(),
 		Product:   "telepresence",
 		Version:   v.GetVersion(),
 	})
 	if err != nil {
-		return fmt.Errorf("ArriveAsClient: %w", err)
+		return fmt.Errorf("ArriveAsClient in %s: %w", ns, err)
 	}
-	logf("session %s established", si.GetSessionId())
+	logf("session %s established for namespace %s", si.GetSessionId(), ns)
 
 	// A session credential authenticates us to the traffic-agent's own ports.
 	// The manager only serves it to the session's owner, and only if it is new
@@ -160,31 +269,37 @@ func (s *Server) runSession(parent context.Context) error {
 	// an older manager and must not stop the preview from working.
 	token := s.fetchSessionCredential(ctx, mc, si)
 
+	sess := &mgrSession{ns: ns, conn: conn, mc: mc, si: si, token: token}
+
 	s.mu.Lock()
-	s.conn, s.mc, s.session, s.sessionToken = conn, mc, si, token
+	s.sessions[ns] = sess
 	s.managerVersion = v.GetName() + " " + v.GetVersion()
-	s.connected = true
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
-		s.connected = false
+		if s.sessions[ns] == sess {
+			delete(s.sessions, ns)
+		}
 		s.mu.Unlock()
-		s.agents.closeAll()
+		// Only this namespace's tunnels. The other namespaces' sessions are
+		// still holding theirs and must not be torn down with this one.
+		s.agents.closeNamespace(ns)
 	}()
 
 	// Record the session so a restarted process can depart it.
-	s.saveSession(si.GetSessionId())
+	s.saveSession(ns, si.GetSessionId())
 
 	errCh := make(chan error, 3)
 
 	go func() { errCh <- s.remainLoop(ctx, mc, si) }()
 	go func() { errCh <- s.watchIntercepts(ctx, mc, si) }()
-	go func() { errCh <- s.agents.watch(ctx, mc, si) }()
+	go func() { errCh <- s.agents.watch(ctx, mc, si, ns) }()
 
-	// Reconcile the registry onto this new session. On a first connection this
-	// is a no-op; after a manager restart it re-raises every live preview.
-	go s.reraiseAll(ctx)
+	// Reconcile this namespace's share of the registry onto the new session.
+	// On a first connection this is a no-op; after a manager restart it
+	// re-raises every live preview in the namespace.
+	go s.reraiseAll(ctx, ns)
 
 	select {
 	case <-ctx.Done():
@@ -217,17 +332,21 @@ func (s *Server) fetchSessionCredential(ctx context.Context, mc managerrpc.Manag
 	return ""
 }
 
-// agentMetadata returns the outgoing metadata for a traffic-agent call. The
-// session token rides under its own key, which is what makes a WatchDial
-// verified; without it the agent accepts the call unverified in permissive
-// mode, and an unverified caller can claim a free dial slot but not displace
-// an established one.
-func (s *Server) agentMetadata(ctx context.Context) context.Context {
-	_, _, tok := s.state()
-	if tok == "" {
+// agentMetadata returns the outgoing metadata for a call to an agent in one
+// namespace. The session token rides under its own key, which is what makes a
+// WatchDial verified; without it the agent accepts the call unverified in
+// permissive mode, and an unverified caller can claim a free dial slot but not
+// displace an established one.
+//
+// The token is the one belonging to THAT namespace's session. A credential is
+// session-scoped, so presenting another session's token to an enforcing agent
+// would be rejected as surely as presenting none.
+func (s *Server) agentMetadata(ctx context.Context, ns string) context.Context {
+	sess := s.sessionFor(ns)
+	if sess == nil || sess.token == "" {
 		return ctx
 	}
-	return metadata.AppendToOutgoingContext(ctx, sessionTokenMetadataKey, tok)
+	return metadata.AppendToOutgoingContext(ctx, sessionTokenMetadataKey, sess.token)
 }
 
 // sessionTokenMetadataKey mirrors pkg/sessiontoken.MetadataKey. It is spelled
@@ -253,17 +372,23 @@ var ownConflictRE = regexp.MustCompile(
 // conflict error itself names the session, which is enough to depart it.
 //
 // Deliberately narrow: it fires ONLY when the blocking intercept was created by
-// a client with our own configured name AND belongs to a session other than
-// ours. A developer's telepresence session has a different client name, so this
-// will never evict a person's intercept; the manager's own ownership check is
-// the second gate, since Depart requires the same Principal.
-func (s *Server) conflictingOwnSession(err error, currentSession string) (string, bool) {
+// a client with our own configured name AND belongs to a session none of our
+// namespaces is currently holding. A developer's telepresence session has a
+// different client name, so this will never evict a person's intercept; the
+// manager's own ownership check is the second gate, since Depart requires the
+// same Principal.
+//
+// "Not ours" is a set membership rather than an inequality now: this process
+// holds one session per namespace, all under the same client name, so a
+// blocking session id that is not the one raising can still be a live sibling -
+// and departing that would tear down a working namespace to unblock another.
+func (s *Server) conflictingOwnSession(err error) (string, bool) {
 	m := ownConflictRE.FindStringSubmatch(err.Error())
 	if m == nil {
 		return "", false
 	}
 	sessionID, client := m[1], m[3]
-	if client != s.cfg.clientName || sessionID == currentSession {
+	if client != s.cfg.clientName || s.liveSessionIDs()[sessionID] {
 		return "", false
 	}
 	return sessionID, true
@@ -350,7 +475,7 @@ func (s *Server) prepare(
 		if attempt > 0 {
 			return nil, fmt.Errorf("PrepareIntercept: %w", err)
 		}
-		stale, ok := s.conflictingOwnSession(err, si.GetSessionId())
+		stale, ok := s.conflictingOwnSession(err)
 		if !ok {
 			return nil, fmt.Errorf("PrepareIntercept: %w", err)
 		}
@@ -365,10 +490,14 @@ func (s *Server) prepare(
 // preview that is already up: the manager is the authority and a duplicate
 // Create for the same name in the same session is reported as such.
 func (s *Server) raise(ctx context.Context, p *Preview) error {
-	mc, si, _ := s.state()
-	if mc == nil || si == nil {
-		return fmt.Errorf("no manager session")
+	// The session for the intercept's OWN namespace. Raising a keycloak
+	// intercept on the bluemountain session is how the intercept came to exist
+	// with nothing ever able to tunnel to it.
+	sess := s.sessionFor(p.Namespace)
+	if sess == nil {
+		return fmt.Errorf("no manager session for namespace %s", p.Namespace)
 	}
+	mc, si := sess.mc, sess.si
 
 	if err := p.resolveTarget(); err != nil {
 		return err
@@ -456,10 +585,11 @@ func (s *Server) raise(ctx context.Context, p *Preview) error {
 
 // remove tears down the manager-side intercept for one preview.
 func (s *Server) remove(ctx context.Context, p *Preview) error {
-	mc, si, _ := s.state()
-	if mc == nil || si == nil {
-		return fmt.Errorf("no manager session")
+	sess := s.sessionFor(p.Namespace)
+	if sess == nil {
+		return fmt.Errorf("no manager session for namespace %s", p.Namespace)
 	}
+	mc, si := sess.mc, sess.si
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -501,13 +631,22 @@ func (s *Server) workloadStillPreviewed(p *Preview) bool {
 	return false
 }
 
-// reraiseAll reconciles every registered preview onto the current session.
-func (s *Server) reraiseAll(ctx context.Context) {
-	ps := s.reg.all()
+// reraiseAll reconciles one namespace's registered previews onto its new
+// session. Scoped to the namespace because that is the only session that has
+// just been rebuilt: the other namespaces' intercepts are still live on
+// sessions that never went away, and re-raising them would collide with
+// themselves.
+func (s *Server) reraiseAll(ctx context.Context, ns string) {
+	var ps []*Preview
+	for _, p := range s.reg.all() {
+		if p.Namespace == ns {
+			ps = append(ps, p)
+		}
+	}
 	if len(ps) == 0 {
 		return
 	}
-	logf("re-raising %d preview(s) onto the new session", len(ps))
+	logf("re-raising %d preview(s) in %s onto the new session", len(ps), ns)
 	for _, p := range ps {
 		if ctx.Err() != nil {
 			return
@@ -522,8 +661,8 @@ func (s *Server) reraiseAll(ctx context.Context) {
 // Shutdown removes every intercept and departs the session. This is the real
 // cleanup path: on SIGTERM the manager state is left as clean as we found it.
 func (s *Server) Shutdown(ctx context.Context) {
-	mc, si, _ := s.state()
-	if mc == nil || si == nil {
+	sessions := s.allSessions()
+	if len(sessions) == 0 {
 		return
 	}
 	for _, p := range s.reg.all() {
@@ -538,12 +677,14 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if _, err := mc.Depart(dctx, si); err != nil {
-		logf("Depart: %v", err)
-	} else {
-		logf("departed session %s", si.GetSessionId())
+	for _, sess := range sessions {
+		if _, err := sess.mc.Depart(dctx, sess.si); err != nil {
+			logf("Depart %s: %v", sess.ns, err)
+			continue
+		}
+		logf("departed session %s (%s)", sess.si.GetSessionId(), sess.ns)
 	}
-	s.clearSession()
+	s.clearSessions()
 }
 
 // --- orphan sweep -----------------------------------------------------------
@@ -569,20 +710,42 @@ func (s *Server) Shutdown(ctx context.Context) {
 // owned. A pod replacement that loses the recorded id leaves the orphan to the
 // manager's own TTL.
 
-func (s *Server) saveSession(id string) {
+// The file holds one "<namespace> <sessionId>" per line, because there is one
+// session per namespace to sweep rather than one. A file written by an older
+// version holds a bare session id on a single line and is still read: see
+// SweepPreviousSession.
+func (s *Server) saveSession(ns, id string) {
 	if s.cfg.statePath == "" {
 		return
 	}
+
+	s.savedMu.Lock()
+	s.saved[ns] = id
+	// Rewritten whole from the in-memory map rather than appended to: N
+	// session loops reconnect independently, and a namespace that reconnects
+	// twice must leave one line, not two.
+	var b strings.Builder
+	for _, n := range s.cfg.allowedNamespaces {
+		if sid := s.saved[n]; sid != "" {
+			b.WriteString(n + " " + sid + "\n")
+		}
+	}
+	body := b.String()
+	s.savedMu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(s.cfg.statePath), 0o755); err != nil {
 		logf("recording session: %v", err)
 		return
 	}
-	if err := os.WriteFile(s.cfg.statePath, []byte(id), 0o600); err != nil {
+	if err := os.WriteFile(s.cfg.statePath, []byte(body), 0o600); err != nil {
 		logf("recording session: %v", err)
 	}
 }
 
-func (s *Server) clearSession() {
+func (s *Server) clearSessions() {
+	s.savedMu.Lock()
+	s.saved = map[string]string{}
+	s.savedMu.Unlock()
 	if s.cfg.statePath != "" {
 		_ = os.Remove(s.cfg.statePath)
 	}
@@ -600,8 +763,8 @@ func (s *Server) SweepPreviousSession(ctx context.Context) {
 		}
 		return
 	}
-	old := strings.TrimSpace(string(b))
-	if old == "" {
+	old := recordedSessions(string(b))
+	if len(old) == 0 {
 		return
 	}
 
@@ -616,14 +779,45 @@ func (s *Server) SweepPreviousSession(ctx context.Context) {
 
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	_, err = managerrpc.NewManagerClient(conn).Depart(dctx, &managerrpc.SessionInfo{SessionId: old})
-	switch {
-	case err == nil:
-		logf("orphan sweep: departed previous session %s, releasing anything it still held", old)
-	case status.Code(err) == codes.NotFound:
-		logf("orphan sweep: previous session %s was already gone", old)
-	default:
-		logf("orphan sweep: departing previous session %s: %v", old, err)
+	mc := managerrpc.NewManagerClient(conn)
+	// Every recorded session, not just one: a previous incarnation held one per
+	// namespace, and leaving any of them undeparted leaves that namespace's
+	// intercepts owned by nobody - which is a HANGING header, not a stale
+	// record.
+	for _, rec := range old {
+		_, err = mc.Depart(dctx, &managerrpc.SessionInfo{SessionId: rec.id})
+		switch {
+		case err == nil:
+			logf("orphan sweep: departed previous session %s (%s), releasing anything it still held", rec.id, rec.ns)
+		case status.Code(err) == codes.NotFound:
+			logf("orphan sweep: previous session %s (%s) was already gone", rec.id, rec.ns)
+		default:
+			logf("orphan sweep: departing previous session %s (%s): %v", rec.id, rec.ns, err)
+		}
 	}
-	s.clearSession()
+	s.clearSessions()
+}
+
+// recordedSession is one line of the state file.
+type recordedSession struct{ ns, id string }
+
+// recordedSessions parses the state file. A line is "<namespace> <sessionId>";
+// a lone token is a file written before this service held a session per
+// namespace, and is swept as a session whose namespace is not recorded. Reading
+// the older format matters for exactly one upgrade - the one where the pod
+// carrying the old format is replaced by this code - but that is the upgrade
+// where an unswept orphan hangs a header.
+func recordedSessions(body string) []recordedSession {
+	var out []recordedSession
+	for _, line := range strings.Split(body, "\n") {
+		switch f := strings.Fields(line); len(f) {
+		case 0:
+			continue
+		case 1:
+			out = append(out, recordedSession{ns: "namespace not recorded", id: f[0]})
+		default:
+			out = append(out, recordedSession{ns: f[0], id: f[1]})
+		}
+	}
+	return out
 }

@@ -43,6 +43,16 @@ controller returns on its first line and no other code path is reached.
 
 ### Fixed
 
+- **Every namespace in `ALLOWED_NAMESPACES` is now served, not just the first.** The process
+  arrived at the manager once, in `allowedNamespaces[0]`, and used that one session for
+  everything — but a client session is bound to the namespace it arrives in, and the manager
+  answers `WatchAgentPods` for that namespace alone. Agent pods in every other allowed
+  namespace were therefore never reported, no tunnel was ever opened to them, and their
+  intercepts held their traffic while reporting themselves `ACTIVE`. Measured on a real
+  cluster with two allowed namespaces: the first was served and the second's requests hung,
+  and swapping the order moved which one hung. There is now one session per allowed
+  namespace, each with its own `WatchAgentPods` stream feeding the one tunnel pool, and each
+  reconnecting on its own so one namespace's manager trouble leaves the others up.
 - **A multi-replica workload now gets a tunnel per replica.** The tunnel pool keyed by
   `"<workload>.<namespace>"`, so the second replica's node-agent looked like the first one
   having changed and its tunnel was rebuilt *over* the first rather than alongside it.
@@ -56,6 +66,12 @@ controller returns on its first line and no other code path is reached.
 
 ### Changed
 
+- `/readyz` reports **`sessions`** — one entry per allowed namespace, with that namespace's
+  session id and whether its credential was minted — in place of the single `session` and
+  `sessionCredential`, plus **`disconnectedNamespaces`** for any allowed namespace without a
+  session. `connected` is *at least one* namespace connected rather than all of them, because
+  `/readyz` is the readiness probe and failing it on one namespace's trouble would stop
+  callers reaching the namespaces that are working.
 - `GET /previews` reports **`agentPods`** (a list) and `agentPodsReported` in place of the
   single `agentPod`, and `/readyz`'s `tunnels` maps each workload to the list of agent pods
   carrying one. Fewer tunnels than the manager reported agent pods is the multi-replica

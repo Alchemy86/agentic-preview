@@ -125,7 +125,7 @@ flowchart TB
 
     subgraph O["Operability"]
         direction TB
-        O1["/readyz reports session<br/>and every tunnel"]
+        O1["/readyz reports a session<br/>per namespace, and every tunnel"]
         O2["Refusals name the field<br/>to fix"]
         O3["Reports image, age<br/>and expiry per preview"]
         O4["Namespaced RBAC only,<br/>never cluster-wide"]
@@ -169,7 +169,8 @@ Or, after replacing the four placeholders catalogued in
 kubectl apply -k deploy/
 ```
 
-Either way it is ready only once a manager session exists, so a green `/readyz` means it
+Either way it is ready only once a manager session exists — one per allowed namespace,
+and `disconnectedNamespaces` names any that are short — so a green `/readyz` means it
 can actually raise something.
 
 ### Get `allowedNamespaces` right
@@ -248,7 +249,7 @@ DELETE /previews/{workId}                         remove a whole work id
 GET    /schedules                                 declared scheduled intercepts and
                                                   their state (read-only)
 GET    /healthz                                   liveness
-GET    /readyz                                    ready only once a session exists
+GET    /readyz                                    a session per allowed namespace, and every tunnel
 ```
 
 One `POST` builds the preview and routes the header:

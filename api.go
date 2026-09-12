@@ -33,26 +33,41 @@ func (s *Server) Handler() http.Handler {
 	return logging(mux)
 }
 
+// handleReady reports one session per allowed namespace, because that is what
+// there is to report: this process holds a session in each, and a namespace
+// whose session is missing can be intercepted in and never tunnelled to.
+//
+// Readiness is "at least one namespace has a session", not "all of them do".
+// This endpoint is the readiness probe, and failing it takes the pod out of its
+// Service - so an all-or-nothing reading would let one namespace's manager
+// trouble stop callers reaching the namespaces that are working, which is
+// precisely the fault this session-per-namespace design exists to end. The
+// namespaces that are NOT connected are named in the body instead, so a partial
+// state is loud without being fatal.
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
-	connected, mgr := s.connected, s.managerVersion
-	session := ""
-	if s.session != nil {
-		session = s.session.GetSessionId()
-	}
-	verified := s.sessionToken != ""
+	mgr := s.managerVersion
 	s.mu.RUnlock()
 
-	body := map[string]any{
-		"connected":         connected,
-		"manager":           mgr,
-		"session":           session,
-		"sessionCredential": verified,
-		"header":            s.cfg.headerName,
-		"allowedNamespaces": s.cfg.allowedNamespaces,
-		"tunnels":           s.agents.status(),
+	live, missing := s.connectedNamespaces()
+	sessions := map[string]any{}
+	for _, sess := range s.allSessions() {
+		sessions[sess.ns] = map[string]any{
+			"session":           sess.si.GetSessionId(),
+			"sessionCredential": sess.token != "",
+		}
 	}
-	if !connected {
+
+	body := map[string]any{
+		"connected":              len(live) > 0,
+		"manager":                mgr,
+		"sessions":               sessions,
+		"header":                 s.cfg.headerName,
+		"allowedNamespaces":      s.cfg.allowedNamespaces,
+		"disconnectedNamespaces": missing,
+		"tunnels":                s.agents.status(),
+	}
+	if len(live) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, body)
 		return
 	}
@@ -138,11 +153,11 @@ func (s *Server) handleAdd(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	connected := s.connected
-	s.mu.RUnlock()
-	if !connected {
-		writeErr(w, http.StatusServiceUnavailable, "no manager session yet")
+	// The session for THIS preview's namespace. Another namespace being
+	// connected says nothing about whether this one can be intercepted in.
+	if s.sessionFor(p.Namespace) == nil {
+		writeErr(w, http.StatusServiceUnavailable,
+			fmt.Sprintf("no manager session for namespace %s yet", p.Namespace))
 		return
 	}
 

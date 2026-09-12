@@ -31,6 +31,18 @@ request. The measured numbers and failure modes are in
   publish it by hand. `charts/artifacthub-repo.yml` has to land beside `index.yaml` there
   because Artifact Hub reads it over HTTP, not from `main`; that file's own header explains
   what is deliberately left unset in it and why.
+- **One manager session per allowed namespace, never one for the process.** A client session
+  is bound to the namespace it arrives in and the manager answers `WatchAgentPods` for that
+  namespace alone, so a single session silently strands every other allowed namespace: its
+  intercepts go `ACTIVE`, no tunnel is ever opened, and the traffic is HELD. `Run` therefore
+  supervises a loop per namespace and the tunnel pool is fed by all of them — which is why a
+  `WatchAgentPods` snapshot replaces only its own namespace's entries (`replaceNamespace`)
+  and a session ending closes only its own tunnels (`closeNamespace`). It is also why
+  `reconcile` claims a pod key in `establishing` *before* dialling: an agent has ONE dial
+  slot, a second `WatchDial` displaces the first, and concurrent passes over a shared pool
+  otherwise leave an agent holding a watcher the losing pass cancels — reported up, traffic
+  held. `agents_test.go` and `session_test.go` are the executable form; the measured failure
+  is in [`docs/LIMITS.md`](docs/LIMITS.md).
 - **`kube.go`'s `kubeAPI` interface is the inventory the RBAC is written from.** It is the
   whole Kubernetes surface this service uses. Adding a method to it means adding a verb to
   `deploy/rbac.yaml`, with the reason spelled out there — do both or neither.

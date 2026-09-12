@@ -56,8 +56,10 @@ $PROG - header-routed preview environments, from the command line.
         that one workload leaves the work id and the rest stays up.
 
     status
-        The manager session, the allowed-namespace list, and one entry per live
-        tunnel. This is /readyz; read it when a preview is up but not routing.
+        One manager session per allowed namespace, any namespace still without
+        one, and one entry per live tunnel. This is /readyz; read it when a
+        preview is up but not routing -- a namespace under
+        disconnectedNamespaces can be intercepted in and never tunnelled to.
 
     schedules
         Scheduled, HEADERLESS intercepts: every window declared in the

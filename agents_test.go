@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -99,16 +100,37 @@ func (a *fakeAgent) info(workload, namespace string) *managerrpc.AgentPodInfo {
 	}
 }
 
-// poolFor is a Server with a session but no cluster: enough for the pool, which
-// only ever talks to agents.
-func poolFor(t *testing.T, p *Preview) *Server {
+// poolFor is a Server with a session per namespace but no cluster: enough for
+// the pool, which only ever talks to agents. The namespaces are the ones the
+// given previews are in, each with its own session, exactly as the real process
+// holds one session per allowed namespace.
+func poolFor(t *testing.T, previews ...*Preview) *Server {
 	t.Helper()
-	s := &Server{cfg: cfgFor(p.Namespace), reg: newRegistry(), sched: newScheduleStates()}
+	var nss []string
+	for _, p := range previews {
+		if !slices.Contains(nss, p.Namespace) {
+			nss = append(nss, p.Namespace)
+		}
+	}
+	s := &Server{
+		cfg:      cfgFor(nss...),
+		reg:      newRegistry(),
+		sched:    newScheduleStates(),
+		sessions: map[string]*mgrSession{},
+		saved:    map[string]string{},
+	}
 	s.cfg.agentReconcile = time.Second
-	s.session = &managerrpc.SessionInfo{SessionId: "test-session"}
+	for _, ns := range nss {
+		s.sessions[ns] = &mgrSession{
+			ns: ns,
+			si: &managerrpc.SessionInfo{SessionId: "test-session-" + ns},
+		}
+	}
 	s.agents = newAgentPool(s)
-	if err := s.reg.add(p); err != nil {
-		t.Fatalf("registry add: %v", err)
+	for _, p := range previews {
+		if err := s.reg.add(p); err != nil {
+			t.Fatalf("registry add: %v", err)
+		}
 	}
 	return s
 }
@@ -125,15 +147,16 @@ func scheduledPreview(workload, namespace string) *Preview {
 	}
 }
 
-// snapshot feeds the pool what the manager would have reported, without a
-// manager.
-func snapshot(p *agentPool, infos ...*managerrpc.AgentPodInfo) {
-	p.mu.Lock()
-	p.latest = map[string]*managerrpc.AgentPodInfo{}
-	for _, ai := range infos {
-		p.latest[podKeyOf(ai)] = ai
-	}
-	p.mu.Unlock()
+// snapshot feeds the pool what the manager would have reported for ONE
+// namespace, without a manager.
+//
+// Per namespace because that is the only shape a snapshot ever arrives in: the
+// manager answers WatchAgentPods for the session's own namespace alone, so each
+// stream is a complete statement about its namespace and says nothing about any
+// other. A test that fed the pool every namespace at once would not be able to
+// catch one namespace's stream erasing another's.
+func snapshot(p *agentPool, ns string, infos ...*managerrpc.AgentPodInfo) {
+	p.replaceNamespace(ns, infos)
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -177,7 +200,7 @@ func TestEveryReplicaGetsItsOwnTunnel(t *testing.T) {
 		infos = append(infos, a.info("checkout-api", "shop"))
 	}
 
-	snapshot(s.agents, infos...)
+	snapshot(s.agents, "shop", infos...)
 	s.agents.reconcile(ctx)
 
 	live := s.agents.status()
@@ -237,7 +260,7 @@ func TestScalingDownDropsOnlyTheDepartedReplica(t *testing.T) {
 	b := newFakeAgent(t, "tel-node-agent-checkout-api-bbb")
 	c := newFakeAgent(t, "tel-node-agent-checkout-api-ccc")
 
-	snapshot(s.agents, a.info("checkout-api", "shop"), b.info("checkout-api", "shop"), c.info("checkout-api", "shop"))
+	snapshot(s.agents, "shop", a.info("checkout-api", "shop"), b.info("checkout-api", "shop"), c.info("checkout-api", "shop"))
 	s.agents.reconcile(ctx)
 
 	s.agents.mu.Lock()
@@ -251,7 +274,7 @@ func TestScalingDownDropsOnlyTheDepartedReplica(t *testing.T) {
 	}
 
 	// The third replica goes; the manager stops reporting its agent.
-	snapshot(s.agents, a.info("checkout-api", "shop"), b.info("checkout-api", "shop"))
+	snapshot(s.agents, "shop", a.info("checkout-api", "shop"), b.info("checkout-api", "shop"))
 	s.agents.reconcile(ctx)
 
 	s.agents.mu.Lock()
@@ -294,7 +317,7 @@ func TestATunnelShortOfTheReplicaCountIsReported(t *testing.T) {
 		NodeAgent:    true,
 	}
 
-	snapshot(s.agents, a.info("checkout-api", "shop"), dead)
+	snapshot(s.agents, "shop", a.info("checkout-api", "shop"), dead)
 	s.agents.reconcile(ctx)
 
 	reg, ok := s.reg.get(p.key())
@@ -306,5 +329,216 @@ func TestATunnelShortOfTheReplicaCountIsReported(t *testing.T) {
 	}
 	if reg.AgentPodsReported != 2 {
 		t.Fatalf("reported agent pods = %d, want 2 - a partial failure is invisible without it", reg.AgentPodsReported)
+	}
+}
+
+// TestEveryAllowedNamespaceIsServedAtOnce is the executable form of the
+// session-per-namespace bug.
+//
+// Measured on a real cluster before the fix, with ALLOWED_NAMESPACES set to two
+// namespaces: the first one was served and the second one's requests HUNG. Not
+// failed - held. Its intercept was created, went ACTIVE and stayed ACTIVE, and
+// every status this service reported said so; what never arrived was a tunnel,
+// because the single client session had arrived in the first namespace and the
+// manager answers WatchAgentPods for the session's own namespace alone. Flipping
+// the order moved the breakage to the other namespace rather than fixing it,
+// which is what proved it was the session and not RBAC, the node-agent Jobs or
+// the schedule.
+//
+// So the property is not "a second namespace can work". It is that BOTH work
+// SIMULTANEOUSLY, on their own sessions, with each namespace's snapshots
+// arriving on their own stream - interleaved here, because a stream that
+// replaced the whole pool instead of its own namespace's share would pass a test
+// that fed them in one go.
+func TestEveryAllowedNamespaceIsServedAtOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	shop := scheduledPreview("checkout-api", "shop")
+	auth := scheduledPreview("keycloak", "identity")
+	s := poolFor(t, shop, auth)
+
+	shopA := newFakeAgent(t, "tel-node-agent-checkout-api-aaa")
+	shopB := newFakeAgent(t, "tel-node-agent-checkout-api-bbb")
+	authA := newFakeAgent(t, "tel-node-agent-keycloak-aaa")
+	authB := newFakeAgent(t, "tel-node-agent-keycloak-bbb")
+
+	// Each namespace's stream reports its own namespace, one after the other,
+	// with a reconcile in between - the interleaving a real pair of watchers
+	// produces.
+	snapshot(s.agents, "shop", shopA.info("checkout-api", "shop"), shopB.info("checkout-api", "shop"))
+	s.agents.reconcile(ctx)
+	snapshot(s.agents, "identity", authA.info("keycloak", "identity"), authB.info("keycloak", "identity"))
+	s.agents.reconcile(ctx)
+
+	// And once more from the first namespace, which is where a pool that
+	// replaced everything on each snapshot would have dropped the second.
+	snapshot(s.agents, "shop", shopA.info("checkout-api", "shop"), shopB.info("checkout-api", "shop"))
+	s.agents.reconcile(ctx)
+
+	live := s.agents.status()
+	if got := len(live["checkout-api.shop"]); got != 2 {
+		t.Fatalf("tunnels for checkout-api.shop = %d, want 2: %v", got, live)
+	}
+	if got := len(live["keycloak.identity"]); got != 2 {
+		t.Fatalf("tunnels for keycloak.identity = %d, want 2: %v", got, live)
+	}
+
+	// A live dial loop on every agent in BOTH namespaces. This is the
+	// assertion the bug failed: the second namespace's agents were never
+	// dialled at all, so nothing answered the requests their intercept held.
+	for _, a := range []*fakeAgent{shopA, shopB, authA, authB} {
+		a := a
+		eventually(t, "a dial loop on "+a.podName, func() bool {
+			w, tn := a.counts()
+			return w == 1 && tn == 1
+		})
+	}
+
+	// Each tunnel was opened on the session belonging to its OWN namespace.
+	// Telling the agent about another namespace's session would register the
+	// dial watcher against a session that never intercepted anything there.
+	s.agents.mu.Lock()
+	defer s.agents.mu.Unlock()
+	for podKey, ac := range s.agents.conns {
+		if ac.ns != s.sessions[ac.ns].ns {
+			t.Fatalf("%s is held under namespace %q", podKey, ac.ns)
+		}
+	}
+	for _, want := range []struct{ podKey, ns string }{
+		{"tel-node-agent-checkout-api-aaa.shop", "shop"},
+		{"tel-node-agent-keycloak-aaa.identity", "identity"},
+	} {
+		ac, ok := s.agents.conns[want.podKey]
+		if !ok {
+			t.Fatalf("no tunnel for %s", want.podKey)
+		}
+		if ac.ns != want.ns {
+			t.Fatalf("tunnel %s is on namespace %q, want %q", want.podKey, ac.ns, want.ns)
+		}
+	}
+}
+
+// TestOneNamespaceLosingItsSessionLeavesTheOthersUp is the other half of the
+// same property, and the reason the pool tears down per namespace rather than
+// wholesale.
+//
+// A session dies on its own schedule - the manager restarts, a session expires -
+// and only that namespace's supervising loop rebuilds it. If the end of one
+// session dropped every tunnel in the pool, a manager hiccup in one namespace
+// would hold every other namespace's traffic until each was re-established:
+// which is the original bug again, just triggered by a reconnect instead of by
+// the order of a list.
+func TestOneNamespaceLosingItsSessionLeavesTheOthersUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	shop := scheduledPreview("checkout-api", "shop")
+	auth := scheduledPreview("keycloak", "identity")
+	s := poolFor(t, shop, auth)
+
+	shopA := newFakeAgent(t, "tel-node-agent-checkout-api-aaa")
+	authA := newFakeAgent(t, "tel-node-agent-keycloak-aaa")
+
+	snapshot(s.agents, "shop", shopA.info("checkout-api", "shop"))
+	snapshot(s.agents, "identity", authA.info("keycloak", "identity"))
+	s.agents.reconcile(ctx)
+
+	s.agents.mu.Lock()
+	kept := s.agents.conns["tel-node-agent-checkout-api-aaa.shop"]
+	n := len(s.agents.conns)
+	s.agents.mu.Unlock()
+	if n != 2 || kept == nil {
+		t.Fatalf("established %d tunnel(s), want 2 including checkout-api's", n)
+	}
+
+	// The identity session ends, exactly as runSession's deferred teardown
+	// does it.
+	s.mu.Lock()
+	delete(s.sessions, "identity")
+	s.mu.Unlock()
+	s.agents.closeNamespace("identity")
+
+	s.agents.mu.Lock()
+	defer s.agents.mu.Unlock()
+	if _, still := s.agents.conns["tel-node-agent-keycloak-aaa.identity"]; still {
+		t.Fatal("the departed namespace's tunnel is still held")
+	}
+	if got := s.agents.conns["tel-node-agent-checkout-api-aaa.shop"]; got != kept {
+		t.Fatalf("shop's tunnel was torn down or rebuilt when identity's session ended")
+	}
+	if ai := s.agents.latest["tel-node-agent-keycloak-aaa.identity"]; ai != nil {
+		t.Fatal("the departed namespace's agent pods are still reported")
+	}
+	if ai := s.agents.latest["tel-node-agent-checkout-api-aaa.shop"]; ai == nil {
+		t.Fatal("shop's agent pods were forgotten with identity's session")
+	}
+}
+
+// TestConcurrentReconcilesDialEachAgentOnce is the regression test for the race
+// that a watcher per namespace made reachable.
+//
+// A traffic-agent has ONE dial slot per client session. A second WatchDial to
+// the same agent displaces the first, so two reconcile passes dialling the same
+// pod leave the agent holding the loser's watcher, which the loser then cancels
+// on finding it lost the pool entry - and the pool goes on reporting a tunnel
+// for a pod that has nobody listening. Its traffic is HELD, which is exactly the
+// failure this whole change exists to remove, arrived at from the other
+// direction.
+//
+// One watcher could not race itself. Measured on a real cluster with a watcher
+// per namespace and a two-replica workload: one replica served, the other hung,
+// both tunnels reported up.
+//
+// The assertion is on the AGENT's count of WatchDial calls, not on the pool's
+// view of itself, because the pool's view was correct throughout the failure.
+func TestConcurrentReconcilesDialEachAgentOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	shop := scheduledPreview("checkout-api", "shop")
+	auth := scheduledPreview("keycloak", "identity")
+	s := poolFor(t, shop, auth)
+
+	shopA := newFakeAgent(t, "tel-node-agent-checkout-api-aaa")
+	shopB := newFakeAgent(t, "tel-node-agent-checkout-api-bbb")
+	authA := newFakeAgent(t, "tel-node-agent-keycloak-aaa")
+	authB := newFakeAgent(t, "tel-node-agent-keycloak-bbb")
+	agents := []*fakeAgent{shopA, shopB, authA, authB}
+
+	snapshot(s.agents, "shop", shopA.info("checkout-api", "shop"), shopB.info("checkout-api", "shop"))
+	snapshot(s.agents, "identity", authA.info("keycloak", "identity"), authB.info("keycloak", "identity"))
+
+	// Several passes at once, as two namespace watchers reconciling the one
+	// pool produce: each has its own stream, its own ticker and its share of
+	// the kicks a raise sends.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.agents.reconcile(ctx)
+		}()
+	}
+	wg.Wait()
+
+	for _, a := range agents {
+		a := a
+		eventually(t, "a dial loop on "+a.podName, func() bool {
+			w, tn := a.counts()
+			return w >= 1 && tn >= 1
+		})
+	}
+
+	// Exactly one WatchDial per agent. More than one means the agent's dial
+	// slot was taken twice, and the tunnel the pool believes it holds is the
+	// one that lost.
+	for _, a := range agents {
+		if w, _ := a.counts(); w != 1 {
+			t.Fatalf("%s saw %d WatchDial call(s), want exactly 1: its dial slot was claimed more than once", a.podName, w)
+		}
+	}
+	if got := len(s.agents.status()["checkout-api.shop"]) + len(s.agents.status()["keycloak.identity"]); got != 4 {
+		t.Fatalf("pool holds %d tunnel(s), want 4", got)
 	}
 }

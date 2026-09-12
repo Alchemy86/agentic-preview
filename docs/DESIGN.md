@@ -47,8 +47,18 @@ In-cluster, there is nothing to tunnel *to*; you are already there.
 Two consequences fall straight out of it:
 
 - **It must be long-lived.** A one-shot API call cannot be the far end of a tunnel. The
-  service holds one manager session for its whole life, and every preview reconciles onto
-  that session.
+  service holds its manager sessions for its whole life, and every preview reconciles onto
+  the session for its own namespace.
+- **One session per allowed namespace, not one session.** A client session is bound to the
+  namespace it arrives in (`ClientInfo.Namespace`), and the manager answers
+  `WatchAgentPods` for that namespace *alone* — with no explicit list, `agentPodNamespaces`
+  falls back to `clientInfo.Namespace` (`cmd/traffic/cmd/manager/service.go`). One session
+  therefore means one namespace's agent pods are ever reported, and intercepts anywhere else
+  go `ACTIVE` with nothing able to tunnel to them, which
+  [holds their traffic rather than failing it over](LIMITS.md#a-session-only-ever-sees-its-own-namespaces-agent-pods).
+  So `Run` supervises a session per entry in `ALLOWED_NAMESPACES`, each with its own
+  `WatchAgentPods` stream, all feeding one tunnel pool. Each namespace reconnects on its own,
+  so a manager relationship that dies in one is rebuilt without disturbing the rest.
 - **`target_host` must be a literal IP.** The agent parses it with `iputil.ParseAddr`
   (`cmd/traffic/cmd/agent/fwd/tcp.go`) and fails the intercept on a name, so
   agentic-preview resolves the preview Service by DNS itself before creating the intercept.
@@ -77,7 +87,7 @@ flowchart LR
 
     subgraph K["inside the cluster"]
         direction LR
-        AP["<b>agentic-preview</b><br/>one session, one process"]
+        AP["<b>agentic-preview</b><br/>one process, a session per namespace"]
         TM["traffic-manager<br/>owns intercept state"]
         NA["node-agent<br/>on the target's node"]
         LIVE["checkout-api<br/>the live pod, untouched"]
@@ -150,7 +160,7 @@ GET    /previews/{workId}                         one work id's service set
 DELETE /previews/{workId}/{namespace}/{workload}  remove one service of a work id
 DELETE /previews/{workId}                         remove a whole work id
 GET    /healthz                                   liveness
-GET    /readyz                                    ready only once a manager session exists
+GET    /readyz                                    a session per allowed namespace, and every tunnel
 ```
 
 ```bash
@@ -211,8 +221,8 @@ reaches all of them — would be lost.
 - **Reconnects.** Each pass of the session loop builds a whole session and reconciles every
   registered preview onto it, so a manager restart or an expired session is the same code
   path as the first connection rather than a special case.
-- **Many previews per process.** One session, one tunnel per agent pod, any number of
-  previews.
+- **Many previews per process, across namespaces.** A session per allowed namespace, one
+  tunnel per agent pod, any number of previews.
 - **Builds the preview from the LIVE workload.** A script that templates a Deployment gets
   three chances to be wrong — the image, the pull credentials, the configuration — and the
   three attempts that preceded this design took all three. Copying the live pod template

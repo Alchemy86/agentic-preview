@@ -161,12 +161,12 @@ func (s *Server) reconcileSchedule(ctx context.Context, sc *schedule, now time.T
 
 // openWindow raises the global intercept, or refuses to and says why.
 func (s *Server) openWindow(ctx context.Context, sc *schedule, st *scheduleState, now time.Time) {
-	s.mu.RLock()
-	connected := s.connected
-	s.mu.RUnlock()
-	if !connected {
+	// The session for the workload's own namespace, not any session: a
+	// schedule in a namespace with no session cannot be raised, however well
+	// connected the rest of the process is.
+	if s.sessionFor(sc.spec.Namespace) == nil {
 		st.Up = false
-		s.alarm(sc, st, now, "no manager session yet; will retry")
+		s.alarm(sc, st, now, "no manager session for namespace "+sc.spec.Namespace+" yet; will retry")
 		return
 	}
 
@@ -224,15 +224,16 @@ func (s *Server) checkWindow(ctx context.Context, sc *schedule, st *scheduleStat
 	if !ok {
 		return
 	}
-	mc, si, _ := s.state()
-	if mc == nil || si == nil {
+	sess := s.sessionFor(p.Namespace)
+	if sess == nil {
 		st.Up = false
-		s.alarm(sc, st, now, "manager session is gone; the intercept will be re-raised when it returns")
+		s.alarm(sc, st, now, "manager session for namespace "+p.Namespace+
+			" is gone; the intercept will be re-raised when it returns")
 		return
 	}
 
 	gctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	ii, err := mc.GetIntercept(gctx, &managerrpc.GetInterceptRequest{Session: si, Name: p.Name})
+	ii, err := sess.mc.GetIntercept(gctx, &managerrpc.GetInterceptRequest{Session: sess.si, Name: p.Name})
 	cancel()
 
 	switch {

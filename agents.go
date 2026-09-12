@@ -41,6 +41,7 @@ type agentConn struct {
 	agentKey string // "<workload>.<namespace>" - what a preview needs a tunnel for
 	podKey   string // "<podName>.<namespace>" - what holds one
 	podName  string
+	ns       string // the namespace, and so which manager session owns this tunnel
 	podIP    netip.Addr
 	apiPort  int32
 
@@ -75,21 +76,42 @@ func podKeyOf(ai *managerrpc.AgentPodInfo) string {
 
 // agentPool keeps one tunnel per agent pod that a registered preview needs,
 // and rebuilds them as the agent pod set changes.
+//
+// One pool, fed by EVERY namespace's session. A session is bound to one
+// namespace and so is the WatchAgentPods stream it carries, but the pod keys
+// those streams report already carry the namespace, and a preview asks the pool
+// for a workload rather than for a session. Keeping one pool is therefore not a
+// compromise: it is the one place that knows, across all namespaces at once,
+// which workloads are short of a tunnel.
 type agentPool struct {
 	srv *Server
 
 	mu     sync.Mutex
 	conns  map[string]*agentConn               // by pod key
 	latest map[string]*managerrpc.AgentPodInfo // last snapshot, by pod key
-	kick   chan struct{}
+	// establishing is the pod keys a reconcile pass has claimed but not yet
+	// finished dialling. It exists because an agent has ONE dial slot: a
+	// second WatchDial to the same agent and session displaces the first, so
+	// two passes dialling the same pod leave the agent holding a watcher that
+	// the losing pass then cancels - and the pool still reporting a tunnel.
+	// The pod is then ACTIVE with nothing listening, which HOLDS its traffic.
+	//
+	// One watcher could not race itself; a watcher per namespace can, because
+	// they reconcile the one pool concurrently. Measured after that change: a
+	// two-replica workload served one replica and hung the other, with both
+	// tunnels reported up, which is indistinguishable from the bug the per-pod
+	// keying fixed and is not the same bug at all.
+	establishing map[string]bool
+	kick         chan struct{}
 }
 
 func newAgentPool(srv *Server) *agentPool {
 	return &agentPool{
-		srv:    srv,
-		conns:  map[string]*agentConn{},
-		latest: map[string]*managerrpc.AgentPodInfo{},
-		kick:   make(chan struct{}, 1),
+		srv:          srv,
+		conns:        map[string]*agentConn{},
+		latest:       map[string]*managerrpc.AgentPodInfo{},
+		establishing: map[string]bool{},
+		kick:         make(chan struct{}, 1),
 	}
 }
 
@@ -118,10 +140,16 @@ func (p *agentPool) reconcileNow() {
 //
 // A local ticker runs alongside the stream because a dial loop can end on its
 // own (the agent pod died) without a new snapshot arriving to prompt a rebuild.
-func (p *agentPool) watch(ctx context.Context, mc managerrpc.ManagerClient, si *managerrpc.SessionInfo) error {
+//
+// One of these runs per namespace, on that namespace's session. The manager
+// answers WatchAgentPods for the session's own namespace and no other, so each
+// stream is authoritative about its namespace and says nothing at all about the
+// rest - which is why a snapshot replaces only its own namespace's entries
+// below, and not the whole map.
+func (p *agentPool) watch(ctx context.Context, mc managerrpc.ManagerClient, si *managerrpc.SessionInfo, ns string) error {
 	st, err := mc.WatchAgentPods(ctx, si)
 	if err != nil {
-		return fmt.Errorf("WatchAgentPods: %w", err)
+		return fmt.Errorf("WatchAgentPods in %s: %w", ns, err)
 	}
 
 	snaps := make(chan []*managerrpc.AgentPodInfo, 8)
@@ -152,20 +180,36 @@ func (p *agentPool) watch(ctx context.Context, mc managerrpc.ManagerClient, si *
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("WatchAgentPods recv: %w", err)
+			return fmt.Errorf("WatchAgentPods in %s recv: %w", ns, err)
 		case agents := <-snaps:
-			p.mu.Lock()
-			p.latest = map[string]*managerrpc.AgentPodInfo{}
-			for _, ai := range agents {
-				p.latest[podKeyOf(ai)] = ai
-			}
-			p.mu.Unlock()
+			p.replaceNamespace(ns, agents)
 			p.reconcile(ctx)
 		case <-p.kick:
 			p.reconcile(ctx)
 		case <-t.C:
 			p.reconcile(ctx)
 		}
+	}
+}
+
+// replaceNamespace swaps in one namespace's agent pods, leaving every other
+// namespace's entries alone.
+//
+// This is the reason the snapshot is not simply assigned. Each namespace's
+// stream reports only its own namespace, so a wholesale replacement would make
+// every snapshot from one namespace erase what the others had reported, and the
+// pool would hold tunnels for whichever namespace reported most recently. That
+// is the same "one at a time" failure the per-pod keying fixed one level down.
+func (p *agentPool) replaceNamespace(ns string, agents []*managerrpc.AgentPodInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for podKey, ai := range p.latest {
+		if ai.GetNamespace() == ns {
+			delete(p.latest, podKey)
+		}
+	}
+	for _, ai := range agents {
+		p.latest[podKeyOf(ai)] = ai
 	}
 }
 
@@ -212,7 +256,17 @@ func (p *agentPool) reconcile(ctx context.Context) {
 		if _, live := p.conns[podKey]; live {
 			continue
 		}
+		if p.establishing[podKey] {
+			// Another pass is already dialling this agent. Dialling it too
+			// would put a second WatchDial in its single dial slot.
+			continue
+		}
 		establish = append(establish, todo{podKey, ai})
+	}
+	// Claimed here, under the same lock that decided them, so a concurrent
+	// pass sees the claim rather than the not-yet-established tunnel.
+	for _, td := range establish {
+		p.establishing[td.podKey] = true
 	}
 	p.mu.Unlock()
 
@@ -267,7 +321,16 @@ func (p *agentPool) publish() {
 // reports a node-agent under the WORKLOAD's namespace while the Job itself runs
 // in the manager's namespace, and the API port is fresh per Job.
 func (p *agentPool) establish(ctx context.Context, ai *managerrpc.AgentPodInfo) error {
-	agentKey, podKey := agentKeyOf(ai), podKeyOf(ai)
+	agentKey, podKey, ns := agentKeyOf(ai), podKeyOf(ai), ai.GetNamespace()
+
+	// The claim reconcile took on this pod key is released however this
+	// returns - the entry in conns is what a later pass reads, and a claim
+	// left behind would stop the tunnel ever being rebuilt.
+	defer func() {
+		p.mu.Lock()
+		delete(p.establishing, podKey)
+		p.mu.Unlock()
+	}()
 
 	podIP, ok := netip.AddrFromSlice(ai.GetPodIp())
 	if !ok {
@@ -286,7 +349,7 @@ func (p *agentPool) establish(ctx context.Context, ai *managerrpc.AgentPodInfo) 
 
 	actx, cancel := context.WithCancel(ctx)
 
-	vctx, vcancel := context.WithTimeout(p.srv.agentMetadata(actx), 20*time.Second)
+	vctx, vcancel := context.WithTimeout(p.srv.agentMetadata(actx, ns), 20*time.Second)
 	_, err = ac.Version(vctx, &emptypb.Empty{})
 	vcancel()
 	if err != nil {
@@ -295,14 +358,19 @@ func (p *agentPool) establish(ctx context.Context, ai *managerrpc.AgentPodInfo) 
 		return fmt.Errorf("agent Version at %s: %w", addr, err)
 	}
 
-	_, si, _ := p.srv.state()
-	if si == nil {
+	// The session of the agent's OWN namespace. WatchDial registers this
+	// client session as the one the agent sends dial requests to, so a tunnel
+	// opened under another namespace's session would be registered against a
+	// session that never intercepted anything here.
+	sess := p.srv.sessionFor(ns)
+	if sess == nil {
 		cancel()
 		conn.Close()
-		return fmt.Errorf("session went away")
+		return fmt.Errorf("no manager session for namespace %s", ns)
 	}
+	si := sess.si
 
-	dialStream, err := ac.WatchDial(p.srv.agentMetadata(actx), si)
+	dialStream, err := ac.WatchDial(p.srv.agentMetadata(actx, ns), si)
 	if err != nil {
 		cancel()
 		conn.Close()
@@ -313,6 +381,7 @@ func (p *agentPool) establish(ctx context.Context, ai *managerrpc.AgentPodInfo) 
 		agentKey: agentKey,
 		podKey:   podKey,
 		podName:  ai.GetPodName(),
+		ns:       ns,
 		podIP:    podIP,
 		apiPort:  ai.GetApiPort(),
 		conn:     conn,
@@ -320,7 +389,11 @@ func (p *agentPool) establish(ctx context.Context, ai *managerrpc.AgentPodInfo) 
 	}
 
 	p.mu.Lock()
-	// Another pass may have got here first.
+	// Should be unreachable: reconcile claims the pod key in `establishing`
+	// before dialling, so no second pass gets this far for the same agent.
+	// Kept as the last resort for any future caller that does not claim -
+	// note that reaching it has already cost the winner its dial slot, so it
+	// is a bug to rely on rather than a branch to take.
 	if _, exists := p.conns[podKey]; exists {
 		p.mu.Unlock()
 		cancel()
@@ -370,6 +443,32 @@ func (p *agentPool) close(ac *agentConn) {
 	logf("tunnel down for %s (%s)", ac.agentKey, ac.podName)
 	ac.cancel()
 	_ = ac.conn.Close()
+}
+
+// closeNamespace drops everything belonging to one namespace's session, which
+// is what a session ending means: its tunnels are dead and its agent pods are
+// no longer being reported to anybody. Every other namespace is untouched -
+// tearing the whole pool down when one session dropped would take working
+// namespaces with it.
+func (p *agentPool) closeNamespace(ns string) {
+	p.mu.Lock()
+	var conns []*agentConn
+	for podKey, ac := range p.conns {
+		if ac.ns == ns {
+			conns = append(conns, ac)
+			delete(p.conns, podKey)
+		}
+	}
+	for podKey, ai := range p.latest {
+		if ai.GetNamespace() == ns {
+			delete(p.latest, podKey)
+		}
+	}
+	p.mu.Unlock()
+	for _, ac := range conns {
+		p.close(ac)
+	}
+	p.publish()
 }
 
 func (p *agentPool) closeAll() {

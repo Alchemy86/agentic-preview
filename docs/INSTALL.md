@@ -147,7 +147,8 @@ so an object it did not create is never written to and never removed.
 
 ## Check it came up
 
-It is ready only once a manager session exists, so a green `/readyz` means it can actually
+It is ready only once a manager session exists — there is one per allowed namespace, and
+`disconnectedNamespaces` names any still without one — so a green `/readyz` means it can actually
 raise something:
 
 ```bash

@@ -62,6 +62,33 @@ its Job does serves its own traffic until the manager provisions one (measured m
 half the requests reached the live workload, none hung). That is the same window as the
 rollout case above, and it fails open.
 
+## A session only ever sees its own namespace's agent pods
+
+A client session is bound to the namespace it arrives in, and the traffic-manager answers
+`WatchAgentPods` for that namespace and no other. With one session for the whole process,
+every namespace in `ALLOWED_NAMESPACES` but the one the session arrived in was a namespace
+whose agent pods were never reported — so no tunnel was ever opened there, and its
+intercepts **held** their traffic exactly as an un-tunnelled replica does above.
+
+It was silent in the worst way. The intercept was created, went `ACTIVE` and stayed
+`ACTIVE`; the manager provisioned the node-agent Jobs and the agents connected to it; and
+`/schedules` reported `open` and `up`. Measured on a real cluster with two allowed
+namespaces: the first namespace in the list was served and the second one's requests hung,
+and **swapping the order moved which namespace hung** rather than fixing either — which is
+what ruled out RBAC, the node-agent Jobs and the schedule, none of which know anything about
+list order.
+
+agentic-preview now holds one session per allowed namespace, each with its own
+`WatchAgentPods` stream feeding the one tunnel pool, and each reconnecting independently.
+`/readyz` reports a session per namespace and names any namespace under
+`disconnectedNamespaces` that has none — a namespace listed there can be intercepted in and
+never tunnelled to, which is the state this entry is about.
+
+Readiness is deliberately *at least one* namespace connected rather than all of them:
+`/readyz` is the readiness probe, and failing it would take the pod out of its Service, so
+an all-or-nothing reading would let one namespace's manager trouble stop callers reaching
+the namespaces that are working.
+
 ## `ALLOWED_NAMESPACES` is the only fence on the forward target
 
 This is the one to understand properly. A preview has three ends, and they are *not*
