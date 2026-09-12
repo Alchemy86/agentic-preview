@@ -41,6 +41,27 @@ on its own — but there is a gap first: **18s in the measured run.** Requests c
 preview header in that window hang rather than falling back to live, for the same reason as
 above. Unmarked traffic is unaffected throughout.
 
+## A multi-replica workload needs a tunnel per replica
+
+Each replica of an intercepted workload gets its own node-agent Job, and each Job holds its
+own dial stream. Traffic reaching a replica whose agent has no tunnel is **held**, not
+failed over — the intercept on that pod is `ACTIVE`, so the agent diverts the connection and
+waits for a client that is not listening.
+
+This was measured on a two-replica workload with a pool keyed by workload rather than by
+agent pod: **17 of 40 requests served, 23 hung**, against 20 of 20 at one replica — and
+`/schedules` reported `open`, `up` and no problem throughout, because one tunnel existed.
+With a tunnel per agent pod the same run is 40 of 40 at two replicas and 60 of 60 at three,
+with no hung requests. `/readyz` lists every agent pod holding a tunnel, and each preview
+reports `agentPods` alongside `agentPodsReported` — the count the manager gave for that
+workload — so fewer tunnels than replicas is visible rather than silent, and a scheduled
+intercept alarms on the difference.
+
+The gap that remains is the provisioning lag, not the pool: a replica that arrives before
+its Job does serves its own traffic until the manager provisions one (measured mid-rollout:
+half the requests reached the live workload, none hung). That is the same window as the
+rollout case above, and it fails open.
+
 ## `ALLOWED_NAMESPACES` is the only fence on the forward target
 
 This is the one to understand properly. A preview has three ends, and they are *not*

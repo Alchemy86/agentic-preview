@@ -319,6 +319,11 @@ cluster.
   specific header value is affected, and the next `POST` for that service clears it.
 - **There is an 18s window during a target-pod rollout** while the tunnel is rebuilt to the
   new node-agent. Preview headers hang in it; unmarked traffic is unaffected.
+- **Every replica of an intercepted workload needs its own tunnel**, because every replica
+  gets its own node-agent and traffic reaching one with no tunnel is *held* rather than
+  failed over. agentic-preview holds one per agent pod and reports both the tunnels it has
+  and the agent count the manager gave, so a shortfall is visible; the residual gap is a
+  replica that arrives before its node-agent Job does, and that one fails open.
 - **A preview can be built and still not run.** A create waits 120s for the pods and fails
   the `POST` with the reason Kubernetes gives rather than raising an intercept that would
   hang. The objects are left in place so you can look at them.

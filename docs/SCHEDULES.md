@@ -169,6 +169,7 @@ the manager directly whether the intercept it created still exists and what stat
 | `NotFound` — gone from manager state | logs `ALARM … has vanished`, raises it again |
 | `NO_AGENT`, `AGENT_ERROR`, `REMOVED`, `NO_PORTS`, `BAD_ARGS`, … | logs `ALARM … is <state>`, removes and raises again |
 | `ACTIVE` with no node-agent tunnel established, for over 90s | logs the alarm and says plainly that requests are being held rather than answered |
+| `ACTIVE` with a tunnel to *some* of the workload's agent pods, for over 90s | logs the alarm with both counts — the replicas without one are holding their share of the traffic |
 | `ACTIVE` | nothing |
 
 It deliberately does not rely on the two safety nets that already exist: `PREVIEW_LIFETIME`

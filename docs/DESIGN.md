@@ -59,6 +59,15 @@ preview matched. Two work ids previewing one workload therefore share one node-a
 and one tunnel — measured. Opening a second `WatchDial` for the same agent and session
 would only fight the first for the same slot.
 
+Per agent **pod**, though, not per workload. A workload with *n* replicas has *n* agents —
+*n* node-agent Jobs — each reporting itself separately over `WatchAgentPods` and holding its
+own dial stream, and the tunnel pool keys by `"<podName>.<namespace>"` so every one of them
+gets a tunnel that none of the others replaces. (Telepresence's own client pool,
+`pkg/client/agentpf/clients.go`, keys the same way.) Nothing here distributes traffic
+between them: an intercepted request only ever arrives on the loop belonging to the pod that
+received it, so the agents have already fanned out by being where the traffic landed. What a
+pool keyed by workload alone does instead is [in the limits](LIMITS.md#a-multi-replica-workload-needs-a-tunnel-per-replica).
+
 ### The shape of one intercepted request
 
 ```mermaid

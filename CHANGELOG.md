@@ -41,6 +41,27 @@
 Nothing about a workload with no declared window changes: with `SCHEDULE_FILE` unset the
 controller returns on its first line and no other code path is reached.
 
+### Fixed
+
+- **A multi-replica workload now gets a tunnel per replica.** The tunnel pool keyed by
+  `"<workload>.<namespace>"`, so the second replica's node-agent looked like the first one
+  having changed and its tunnel was rebuilt *over* the first rather than alongside it.
+  Traffic reaching the replica left without one was held, not failed over: measured on a
+  two-replica workload, 17 of 40 requests served and 23 hung, with `/schedules` reporting
+  open, up and no problem throughout. The pool now keys by `"<podName>.<namespace>"`, as
+  Telepresence's own client pool does, and holds every reported agent pod's tunnel at once —
+  40 of 40 at two replicas and 60 of 60 at three, none hung. Nothing distributes traffic
+  between them and nothing needs to: an intercepted request arrives on the loop belonging to
+  the pod that received it.
+
+### Changed
+
+- `GET /previews` reports **`agentPods`** (a list) and `agentPodsReported` in place of the
+  single `agentPod`, and `/readyz`'s `tunnels` maps each workload to the list of agent pods
+  carrying one. Fewer tunnels than the manager reported agent pods is the multi-replica
+  failure confined to a fraction of the traffic, and a scheduled intercept now alarms on it
+  rather than reporting itself up.
+
 ## v0.2.0
 
 ### Added

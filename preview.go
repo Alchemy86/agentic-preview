@@ -145,9 +145,18 @@ type Preview struct {
 	Disposition string `json:"disposition"`
 	Message     string `json:"message,omitempty"`
 
-	// AgentPod is the node-agent pod currently carrying this workload's
-	// tunnel; empty when no dial loop is established.
-	AgentPod string `json:"agentPod,omitempty"`
+	// AgentPods are the agent pods currently carrying this workload's tunnels,
+	// one per live replica; empty when no dial loop is established. It is a
+	// LIST because a workload with two replicas has two agents and needs a
+	// tunnel to each - see the header comment on agentConn.
+	AgentPods []string `json:"agentPods,omitempty"`
+
+	// AgentPodsReported is how many agent pods the manager last reported for
+	// this workload. Fewer tunnels than that is the multi-replica failure and
+	// it is silent otherwise: the intercept on an un-tunnelled pod stays
+	// ACTIVE and holds its share of the traffic rather than failing over. The
+	// schedule controller alarms on the difference.
+	AgentPodsReported int `json:"agentPodsReported,omitempty"`
 
 	// Image is the image reference the preview is running, when agentic-preview
 	// built the preview itself. Empty when the caller deployed the preview and
@@ -613,6 +622,17 @@ func (r *registry) workloads() map[string]bool {
 	return out
 }
 
+// workloadList is workloads() in a stable order, for anything that has to walk
+// the set rather than test membership.
+func (r *registry) workloadList() []string {
+	out := make([]string, 0, len(r.byKey))
+	for k := range r.workloads() {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // touch extends the life of EVERY service under a work id, because a work id
 // is one change and its services are looked at together: adding the third
 // repository's PR to an id means the first two are still being used.
@@ -661,14 +681,16 @@ func (r *registry) setStatus(name, disposition, message string) {
 	}
 }
 
-// setAgentPod records which node-agent pod carries a workload's tunnel, for
-// every preview of that workload whatever its work id.
-func (r *registry) setAgentPod(agentKey, podName string) {
+// setAgentPods records which agent pods carry a workload's tunnels, and how
+// many agent pods the manager reported for it, for every preview of that
+// workload whatever its work id.
+func (r *registry) setAgentPods(agentKey string, pods []string, reported int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, p := range r.byKey {
 		if p.agentKey() == agentKey {
-			p.AgentPod = podName
+			p.AgentPods = pods
+			p.AgentPodsReported = reported
 		}
 	}
 }

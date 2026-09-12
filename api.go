@@ -191,7 +191,8 @@ func (s *Server) handleAdd(w http.ResponseWriter, req *http.Request) {
 		// the new record and say plainly that it rolled rather than that
 		// nothing happened.
 		if sameTarget {
-			p.Disposition, p.Message, p.AgentPod = prev.Disposition, prev.Message, prev.AgentPod
+			p.Disposition, p.Message = prev.Disposition, prev.Message
+			p.AgentPods, p.AgentPodsReported = prev.AgentPods, prev.AgentPodsReported
 			if err := s.reg.add(p); err != nil {
 				writeErr(w, http.StatusConflict, err.Error())
 				return

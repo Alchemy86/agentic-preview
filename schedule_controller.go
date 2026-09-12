@@ -263,11 +263,24 @@ func (s *Server) checkWindow(ctx context.Context, sc *schedule, st *scheduleStat
 		// hangs: the agent has an intercept to serve and nothing to serve it
 		// to. It is normal for a moment after raising while the agent pool
 		// reconciles, and an alarm after that.
-		if p.AgentPod == "" && now.Sub(st.raisedAt) > raiseGrace {
+		if len(p.AgentPods) == 0 && now.Sub(st.raisedAt) > raiseGrace {
 			st.Up = false
 			s.alarm(sc, st, now, fmt.Sprintf(
 				"intercept %s is ACTIVE but no node-agent tunnel is established: requests to %s.%s are being "+
 					"held rather than answered. Check the node-agent Job", p.Name, p.Workload, p.Namespace))
+			return
+		}
+		// A tunnel to SOME of the workload's agent pods is the same failure
+		// confined to a fraction of the traffic, and it is the one that used to
+		// pass unnoticed: the intercept is ACTIVE on every replica, so the
+		// replicas with no tunnel hold their share of the requests forever
+		// while this schedule reports itself up.
+		if n := len(p.AgentPods); n > 0 && n < p.AgentPodsReported && now.Sub(st.raisedAt) > raiseGrace {
+			st.Up = false
+			s.alarm(sc, st, now, fmt.Sprintf(
+				"intercept %s is ACTIVE on %d agent pod(s) of %s.%s but only %d tunnel(s) are established: "+
+					"requests reaching the other replica(s) are being held rather than answered. "+
+					"Check the node-agent Jobs", p.Name, p.AgentPodsReported, p.Workload, p.Namespace, n))
 			return
 		}
 		if !st.Up {
