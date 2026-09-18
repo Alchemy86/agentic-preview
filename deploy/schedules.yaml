@@ -127,6 +127,25 @@ data:
         # with nobody watching - on the path of the one operation that must not
         # be fragile. To point at a Service, write its ClusterIP down here.
         redirectTo: 10.42.0.9
+        # The pods that will NOT notice any of this on their own, and so have
+        # to be replaced when the line goes in and again when it comes out.
+        #
+        # A redirect changes the name for everything that asks from then on and
+        # for nothing that has already asked. Anything holding a connection
+        # pool asked once, at startup: it keeps talking to the old address
+        # straight through the window and straight out the other side, and the
+        # drift check cannot see it because the ConfigMap is correct the whole
+        # time. Measured on a real estate: a database client sat pinned to the
+        # stand-in for four days after the window shut, and every login against
+        # it failed.
+        #
+        # Optional, and empty is right for a dependency whose clients reconnect
+        # on their own. Each namespace must be in ALLOWED_NAMESPACES - deleting
+        # a pod is a workload operation - and each selector is required, because
+        # an empty one matches every pod in the namespace.
+        recyclePods:
+          - namespace: shop
+            selector: app=checkout-api
         # The windows are the same machinery, read the same way, in the same
         # zone. There is one implementation of them for both kinds.
         windows:

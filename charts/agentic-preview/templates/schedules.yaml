@@ -29,8 +29,8 @@
   {{- if not $s.type }}
     {{- fail (printf "schedules[%d] (%s): type is required, and must be \"intercept\" or \"dns\". An existing schedule that intercepts a workload is `type: intercept`" $i $s.name) }}
   {{- else if eq $s.type "intercept" }}
-    {{- if or $s.hostname $s.redirectTo }}
-      {{- fail (printf "schedules[%d] (%s): is `type: intercept` but carries hostname/redirectTo, which are DNS-mode fields. An entry is exactly one kind" $i $s.name) }}
+    {{- if or $s.hostname $s.redirectTo $s.recyclePods }}
+      {{- fail (printf "schedules[%d] (%s): is `type: intercept` but carries hostname/redirectTo/recyclePods, which are DNS-mode fields. An entry is exactly one kind" $i $s.name) }}
     {{- end }}
     {{- if not $s.workload }}{{ fail (printf "schedules[%d] (%s): workload is required" $i $s.name) }}{{ end }}
     {{- if not $s.namespace }}{{ fail (printf "schedules[%d] (%s): namespace is required" $i $s.name) }}{{ end }}
@@ -59,6 +59,21 @@
     {{- end }}
     {{- if not $.Values.scheduleDNSConfigMap.namespace }}
       {{- fail (printf "schedules[%d] (%s): scheduleDNSConfigMap.name is set but .namespace is not" $i $s.name) }}
+    {{- end }}
+    {{- /*
+      recyclePods is the one thing this kind does that is not a write to that
+      ConfigMap: it deletes pods, so it is bounded by allowedNamespaces like
+      every other workload operation. The service refuses the same two things at
+      boot; both must move together, and neither may be the only one.
+    */}}
+    {{- range $j, $r := $s.recyclePods }}
+      {{- if not $r.namespace }}{{ fail (printf "schedules[%d] (%s): recyclePods[%d]: namespace is required" $i $s.name $j) }}{{ end }}
+      {{- if not (has $r.namespace $allowed) }}
+        {{- fail (printf "schedules[%d] (%s): recyclePods[%d]: namespace %q is not in allowedNamespaces (%s). Deleting a pod is a workload operation and is bounded by the same list as every other one" $i $s.name $j $r.namespace (join ", " $allowed)) }}
+      {{- end }}
+      {{- if not $r.selector }}
+        {{- fail (printf "schedules[%d] (%s): recyclePods[%d]: selector is required and may not be empty - an empty selector matches every pod in %s" $i $s.name $j $r.namespace) }}
+      {{- end }}
     {{- end }}
   {{- else }}
     {{- fail (printf "schedules[%d] (%s): type %q is not a kind of schedule: it is \"intercept\" (globally intercept a workload) or \"dns\" (redirect a DNS name)" $i $s.name $s.type) }}

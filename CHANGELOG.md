@@ -67,6 +67,22 @@
     the resolver is not reloaded every 30s. Verified against CoreDNS 1.11.3: the trailing tag
     comment is ignored, `hosts` answers over `forward` regardless of the order the Corefile
     writes them in, and a neighbouring untagged entry is untouched.
+  - **`recyclePods` finishes the job on clients that pooled the old answer.** A redirect
+    changes the name for everything that asks from then on and for nothing that has already
+    asked, and a client with a connection pool asked once, at startup — so it talks to the
+    old address straight through the window and straight out the other side, and neither the
+    drift check nor `problem` can see it, because the ConfigMap is correct the whole time.
+    Measured: a Keycloak pair held five pooled JDBC connections each to the stand-in for four
+    days after the window shut, and every login in working hours failed `user_not_found` with
+    nothing in the scheduler saying anything was wrong. A DNS schedule may now name pods that
+    are deleted when the line goes in and again when it comes out — the pod rather than its
+    owner, so it works the same for a Deployment, a StatefulSet and an operator-managed pod.
+    Only where the line actually changed: never on an adopted line and never on a drift
+    re-apply, which runs hundreds of times in one window. Each namespace must be in
+    `ALLOWED_NAMESPACES` and each selector is required, refused at boot and at chart render;
+    the Roles grow `delete` on `pods`. A failure is `recycleProblem` on `GET /schedules`,
+    naming the pods that may still hold the old address, and is not retried — the deleted
+    pods have been replaced by now and a second pass would take out the replacements.
 - **Forcing a window on demand**, either kind: `kubectl agentic-preview override <name>
   open|closed|auto [--for 2h]`, or `POST /schedules/{name}/override`. It is a layer on top of
   the reconcile loop and not a replacement — a forced-open intercept that dies is still

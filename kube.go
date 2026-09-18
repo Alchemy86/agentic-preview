@@ -37,6 +37,15 @@ type kubeAPI interface {
 
 	listPods(ctx context.Context, ns, selector string) ([]corev1.Pod, error)
 
+	// deletePod is used by a DNS-redirect schedule's recyclePods ONLY, against
+	// namespaces in ALLOWED_NAMESPACES. A pod whose connection pool is pinned
+	// to the address a name USED to have re-resolves only when it is replaced;
+	// see ScheduleSpec.RecyclePods. Deleting the pod rather than patching its
+	// owner is deliberate - it needs no knowledge of what owns it, so it works
+	// for a Deployment, a StatefulSet and an operator-managed pod alike, and it
+	// asks for no verb on a resource this service does not otherwise touch.
+	deletePod(ctx context.Context, ns, name string) error
+
 	// The two below are used by DNS-redirect schedules ONLY, against the single
 	// ConfigMap named by SCHEDULE_DNS_CONFIGMAP_NAMESPACE/_NAME, and only when
 	// such a schedule is declared. There is no create: this service never
@@ -96,6 +105,14 @@ func (k *clusterKube) listDeployments(ctx context.Context, ns, selector string) 
 
 func (k *clusterKube) deleteDeployment(ctx context.Context, ns, name string) error {
 	err := k.cs.AppsV1().Deployments(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (k *clusterKube) deletePod(ctx context.Context, ns, name string) error {
+	err := k.cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}

@@ -27,6 +27,7 @@ type fakeKube struct {
 
 	deletedDeployments []string
 	deletedServices    []string
+	deletedPods        []string
 	created            []string
 	updated            []string
 }
@@ -153,6 +154,17 @@ func (f *fakeKube) listPods(_ context.Context, ns, selector string) ([]corev1.Po
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeKube) deletePod(_ context.Context, ns, name string) error {
+	f.deletedPods = append(f.deletedPods, name+"."+ns)
+	for i := range f.pods {
+		if f.pods[i].Namespace == ns && f.pods[i].Name == name {
+			f.pods = append(f.pods[:i], f.pods[i+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 // liveDeployment is a workload with everything on it that a preview built from

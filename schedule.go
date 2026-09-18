@@ -15,6 +15,7 @@ import (
 	// says - including the two DST shifts an overnight window sits across.
 	_ "time/tzdata"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/yaml"
 )
 
@@ -171,9 +172,47 @@ type ScheduleSpec struct {
 	// to make deliberately.
 	RedirectTo string `json:"redirectTo,omitempty"`
 
+	// RecyclePods names the pods that hold connections to Hostname and will
+	// not notice it changed. DNS kind only, and optional.
+	//
+	// Changing what a name resolves to changes it for everything that asks
+	// from then on, and for NOTHING THAT HAS ALREADY ASKED. A client with a
+	// connection pool asked once, at startup, and then held the answer open:
+	// it keeps talking to the old address across the open of the window and
+	// across the close of it, whatever the resolver now says. That is not a
+	// transient - the pool refills from its own live connections, so it never
+	// re-resolves at all, and the drift check in dns.go cannot see it because
+	// the ConfigMap is exactly right the whole time.
+	//
+	// Each entry is a namespace and a label selector, and every matching pod
+	// is deleted when the line goes in and again when it comes out. Deleting
+	// the pod rather than patching its owner is what makes this work the same
+	// for a Deployment, a StatefulSet and something an operator owns - the
+	// owner puts it back, and the replacement resolves the name afresh.
+	//
+	// The namespace must be in ALLOWED_NAMESPACES. This is the one thing the
+	// DNS kind does that is not a write to the configured ConfigMap, so it is
+	// bounded by the fence that bounds every other workload this service
+	// touches rather than by a second one invented here. The selector is
+	// required and may not be empty: an empty selector matches every pod in
+	// the namespace, which is not something to arrive at by leaving a field
+	// out.
+	RecyclePods []RecycleTarget `json:"recyclePods,omitempty"`
+
 	// Windows are the recurring spans the schedule is up for. Several are
 	// allowed and they may overlap; it is up if any of them covers the moment.
 	Windows []Window `json:"windows"`
+}
+
+// RecycleTarget is one set of pods deleted when a DNS redirect goes in or
+// comes out. Both fields are required; see ScheduleSpec.RecyclePods.
+type RecycleTarget struct {
+	// Namespace the pods are in. Must be one of ALLOWED_NAMESPACES.
+	Namespace string `json:"namespace"`
+
+	// Selector is a label selector ("app=keycloak"), in the form
+	// kubectl -l takes. It may not be empty.
+	Selector string `json:"selector"`
 }
 
 // Window is one recurring span: it OPENS at Start on each of Days and runs for
@@ -224,6 +263,10 @@ type schedule struct {
 	// overridden and the address it points at while the window is open.
 	hostname   string
 	redirectTo string
+
+	// recycle is the compiled RecyclePods: namespace and selector, both
+	// checked at boot so that 18:32 is not where a bad selector is found.
+	recycle []RecycleTarget
 
 	loc     *time.Location
 	windows []window
@@ -443,7 +486,7 @@ func compileSchedule(spec ScheduleSpec, defLoc string, cfg *config) (*schedule, 
 
 	sc := &schedule{spec: spec, kind: kind, loc: l, windows: ws}
 	if kind == kindDNS {
-		return sc, compileDNSSchedule(sc)
+		return sc, compileDNSSchedule(sc, cfg)
 	}
 	return sc, compileInterceptSchedule(sc, cfg)
 }
@@ -482,6 +525,9 @@ func scheduleKindOf(spec ScheduleSpec) (scheduleKind, error) {
 		[2]string{"hostname", spec.Hostname},
 		[2]string{"redirectTo", spec.RedirectTo},
 	)
+	if len(spec.RecyclePods) > 0 {
+		dns = append(dns, "recyclePods")
+	}
 
 	switch strings.ToLower(strings.TrimSpace(spec.Type)) {
 	case "":
@@ -515,12 +561,16 @@ func scheduleKindOf(spec ScheduleSpec) (scheduleKind, error) {
 
 // compileDNSSchedule fills in the DNS kind's half.
 //
-// Note what it does NOT check: ALLOWED_NAMESPACES. That fence bounds where an
-// intercept may be raised and where a tunnel may be dialled, and a DNS redirect
-// does neither - it writes one line into one ConfigMap named by
-// SCHEDULE_DNS_CONFIGMAP, which is its own, separate fence and the only place
-// this kind can write at all.
-func compileDNSSchedule(sc *schedule) error {
+// Note what the REDIRECT half does not check: ALLOWED_NAMESPACES. That fence
+// bounds where an intercept may be raised and where a tunnel may be dialled,
+// and a DNS redirect does neither - it writes one line into one ConfigMap named
+// by SCHEDULE_DNS_CONFIGMAP, which is its own, separate fence and the only
+// place this kind can write at all.
+//
+// recyclePods is the exception, and it is why cfg is here: deleting a pod IS
+// touching a workload, so it is held to the same fence every other workload
+// operation in this service is held to.
+func compileDNSSchedule(sc *schedule, cfg *config) error {
 	host := strings.TrimSpace(sc.spec.Hostname)
 	if host == "" {
 		return fmt.Errorf("hostname is required alongside redirectTo: the DNS name overridden while the window is open")
@@ -544,6 +594,30 @@ func compileDNSSchedule(sc *schedule) error {
 	}
 
 	sc.hostname, sc.redirectTo = host, addr.Unmap().String()
+
+	for i, r := range sc.spec.RecyclePods {
+		ns := strings.TrimSpace(r.Namespace)
+		sel := strings.TrimSpace(r.Selector)
+		if ns == "" {
+			return fmt.Errorf("recyclePods[%d]: namespace is required", i)
+		}
+		if !nameRE.MatchString(ns) {
+			return fmt.Errorf("recyclePods[%d]: namespace %q must be a DNS label", i, r.Namespace)
+		}
+		if !cfg.namespaceAllowed(ns) {
+			return fmt.Errorf("recyclePods[%d]: namespace %q is not in ALLOWED_NAMESPACES (%s): "+
+				"deleting a pod is a workload operation and is bounded by the same list as every other one",
+				i, ns, strings.Join(cfg.allowedNamespaces, ", "))
+		}
+		if sel == "" {
+			return fmt.Errorf("recyclePods[%d]: selector is required and may not be empty: "+
+				"an empty selector matches every pod in %s", i, ns)
+		}
+		if _, err := labels.Parse(sel); err != nil {
+			return fmt.Errorf("recyclePods[%d]: selector %q: %w", i, r.Selector, err)
+		}
+		sc.recycle = append(sc.recycle, RecycleTarget{Namespace: ns, Selector: sel})
+	}
 	return nil
 }
 

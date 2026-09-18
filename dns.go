@@ -225,6 +225,7 @@ func (s *Server) openDNSWindow(ctx context.Context, sc *schedule, st *scheduleSt
 	st.Raises++
 	if changed {
 		logf("schedule %s: %s now resolves to %s (%s)", sc.spec.Name, sc.hostname, sc.redirectTo, s.dnsTargetRef())
+		s.recyclePods(ctx, sc, st, "now resolves to "+sc.redirectTo)
 	} else {
 		logf("schedule %s: %s already resolves to %s (%s); adopted it",
 			sc.spec.Name, sc.hostname, sc.redirectTo, s.dnsTargetRef())
@@ -300,7 +301,85 @@ func (s *Server) closeDNSWindow(ctx context.Context, sc *schedule, st *scheduleS
 	if changed {
 		logf("schedule %s: redirect for %s removed from %s; it resolves normally again",
 			sc.spec.Name, sc.hostname, s.dnsTargetRef())
+		s.recyclePods(ctx, sc, st, "resolves normally again")
 	}
+}
+
+// recyclePods deletes the pods a schedule declares cannot re-resolve on their
+// own, because the name they hold open has just started answering differently.
+//
+// WHEN IT RUNS, and it is the whole correctness of this. Only where the tagged
+// line ACTUALLY CHANGED - the open that wrote it and the close that took it
+// back out. Not on an adopted line, which was already there and whose pods were
+// already recycled by whoever wrote it; and emphatically not from
+// checkDNSWindow, which re-applies the line on every tick something is fighting
+// the controller over. ReRaises on dev's own sql-offhours schedule climbs into
+// the hundreds across one window, and a recycle on that path would be a rolling
+// restart of the declared workloads every 30 seconds for twelve hours.
+//
+// WHAT A FAILURE IS. Readable, never fatal, and never a reason to undo the
+// line: the redirect is the operation and the recycle is the follow-through, so
+// the window is already open or already shut either way. It lands in
+// `recycleProblem` on GET /schedules rather than in `problem`, because it
+// outlives the window it happened in - a pod still pinned to the stand-in at
+// 07:22 is a fact about the working day, not about the window that just shut -
+// and it is NOT retried; see RecycleProblem for why a second pass would delete
+// the replacements. Leaving st.applied and st.swept alone matters for the same
+// reason: a recycle that failed must not send the next tick back to rewrite a
+// ConfigMap that is already correct.
+func (s *Server) recyclePods(ctx context.Context, sc *schedule, st *scheduleState, because string) {
+	if len(sc.recycle) == 0 {
+		return
+	}
+	if s.kube == nil {
+		s.failedRecycle(sc, st, because, []string{"no Kubernetes API client: " + s.kubeErr.Error()})
+		return
+	}
+
+	var failed []string
+	for _, r := range sc.recycle {
+		pods, err := s.kube.listPods(ctx, r.Namespace, r.Selector)
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("listing %s in %s: %v", r.Selector, r.Namespace, err))
+			continue
+		}
+		if len(pods) == 0 {
+			// Not a failure. A selector that matches nothing is worth saying
+			// out loud once per transition, because it is indistinguishable
+			// from a correct one until the day the labels change under it.
+			logf("schedule %s: no pods match %s in %s; nothing to recycle",
+				sc.spec.Name, r.Selector, r.Namespace)
+			continue
+		}
+		var done int
+		for _, pod := range pods {
+			if err := s.kube.deletePod(ctx, r.Namespace, pod.Name); err != nil {
+				failed = append(failed, fmt.Sprintf("deleting %s.%s: %v", pod.Name, r.Namespace, err))
+				continue
+			}
+			done++
+		}
+		if done > 0 {
+			logf("schedule %s: recycled %d pod(s) matching %s in %s - %s %s",
+				sc.spec.Name, done, r.Selector, r.Namespace, sc.hostname, because)
+		}
+	}
+
+	if len(failed) > 0 {
+		s.failedRecycle(sc, st, because, failed)
+		return
+	}
+	st.RecycleProblem = ""
+}
+
+// failedRecycle records why pods that should have been replaced were not, and
+// says so in the log as well as on GET /schedules. Both, because the two answer
+// different questions: the log says when it happened, and the status field says
+// it is still true.
+func (s *Server) failedRecycle(sc *schedule, st *scheduleState, because string, failed []string) {
+	st.RecycleProblem = "recycling pods after " + sc.hostname + " " + because + ": " +
+		strings.Join(failed, "; ") + " - they may still hold connections to the old address"
+	logf("schedule %s: ALARM - %s", sc.spec.Name, st.RecycleProblem)
 }
 
 // --- the ConfigMap half -----------------------------------------------------

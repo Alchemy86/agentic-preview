@@ -78,6 +78,14 @@ request. The measured numbers and failure modes are in
   `ALLOWED_NAMESPACES`, which bounds interception and forwarding and says nothing about the
   resolver. A missing permission must stay an alarm, never a crash - `dns_test.go` is the
   executable form of that and of the coexistence and drift behaviour.
+  **A redirect reaches nothing that is already connected**, and the ConfigMap being perfect
+  hides it completely: a pooled client resolved the name once at startup and never asks
+  again, so it talks to the stand-in straight through the close of the window while every
+  check in `dns.go` passes. `recyclePods` is the answer and it only fires where the tagged
+  line ACTUALLY CHANGED - never on an adopted line, never on the drift re-apply, which runs
+  hundreds of times per window. It is the one thing this kind does that is not a ConfigMap
+  write, so it is fenced by `ALLOWED_NAMESPACES` like every other workload operation, in the
+  service AND in the chart template. The measured failure is in [`docs/SCHEDULES.md`](docs/SCHEDULES.md).
 - **`POST /schedules/{name}/override` forces a declared window open or closed and must never
   become a way to declare one.** It changes exactly one thing, `desiredOpen`; everything else
   in the loop still runs, which is why a forced-open target is still health-checked, still

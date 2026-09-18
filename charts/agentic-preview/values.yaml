@@ -144,6 +144,12 @@ preview:
 #       type: dns
 #       hostname: dev-db.example.internal   # the name overridden while the window is open
 #       redirectTo: 10.42.0.9               # where it points, as a LITERAL IP - see below
+#       # Pods that pooled the old answer and will never re-resolve: replaced
+#       # when the line goes in and again when it comes out. Optional; each
+#       # namespace must be in allowedNamespaces and each selector is required.
+#       recyclePods:
+#         - namespace: shop
+#           selector: app=checkout-api
 #       windows:
 #         - days: [Mon, Tue, Wed, Thu]
 #           start: "18:32"

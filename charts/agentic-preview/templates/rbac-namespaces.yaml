@@ -118,9 +118,12 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "create", "update", "delete"]
+  # delete is for a DNS schedule's recyclePods: a pod that pooled the old
+  # answer for a redirected name never re-resolves, so it has to be replaced
+  # when the window opens and again when it shuts. See deploy/rbac.yaml.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list"]
+    verbs: ["list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

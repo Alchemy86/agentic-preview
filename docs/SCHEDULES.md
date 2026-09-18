@@ -190,6 +190,9 @@ schedules:
     type: dns
     hostname: dev-db.example.internal   # the name overridden while the window is open
     redirectTo: 10.42.0.9               # where it points, as a literal IP
+    recyclePods:                        # pods that will not re-resolve on their own
+      - namespace: shop
+        selector: app=checkout-api
     windows:
       - days: [Mon, Tue, Wed, Thu]
         start: "18:32"
@@ -205,6 +208,48 @@ the one operation that must not be fragile. A literal address is proved parseabl
 which is the posture everything else in this file already takes. To point at a Service, write
 its ClusterIP down: a ClusterIP is stable for the life of the Service, and a Service
 recreated with a new one is a change worth having to make deliberately.
+
+### A redirect reaches nothing that is already connected
+
+This is the sharp edge of the mode, and `recyclePods` is the answer to it.
+
+Changing what a name resolves to changes it for everything that asks **from then on**, and
+for nothing that has already asked. A client with a connection pool asked once, at startup,
+and then held the answer open. It keeps talking to the old address straight through the open
+of the window, and straight through the close of it, whatever the resolver now says — and
+because the pool refills from its own live connections, it never re-resolves at all. Nothing
+above can see this: the ConfigMap is exactly right the whole time, so the drift check passes
+on every tick and `problem` stays empty.
+
+Measured on a real estate, and the reason this field exists: a Keycloak pair whose database
+is the redirected name held five pooled JDBC connections each to the stand-in's ClusterIP for
+**four days** after the window shut. Every window in the scheduler was correct, the hosts line
+was long gone, DNS answered the real address — and every login failed, because the pods were
+still reading an empty stand-in database. `user_not_found`, `client_not_found`, in working
+hours, with nothing in the scheduler to say anything was wrong.
+
+```yaml
+    recyclePods:
+      - namespace: shop
+        selector: app=checkout-api
+```
+
+Every matching pod is **deleted when the line goes in, and again when it comes out**. Deleting
+the pod rather than patching its owner is what makes it work identically for a Deployment, a
+StatefulSet and something an operator owns: the owner puts a replacement back, and the
+replacement resolves the name afresh.
+
+| | |
+| :--- | :--- |
+| when it runs | only where the tagged line **actually changed** — the open that wrote it, the close that removed it |
+| when it does not | an adopted line (already there when this pod started), a drift re-apply, and every healthy tick. `reRaises` climbs into the hundreds across one real window; a recycle on that path would be a rolling restart every 30 seconds for twelve hours |
+| the fence | each `namespace` must be in `ALLOWED_NAMESPACES`. Deleting a pod is a workload operation, so it is bounded by the list that bounds every other one — not by a second fence invented for this |
+| `selector` | required, and may not be empty. An empty selector matches every pod in the namespace, which is not a thing to arrive at by leaving a field out |
+| the permission | `delete` on `pods`, in those namespaces. It is in `deploy/rbac.yaml` and in the chart's per-namespace Role already |
+| a failure | `recycleProblem` on `GET /schedules`, naming the pods that may still hold the old address. **Never retried** — the pods that were deleted have been replaced by now, and a second pass would take out the replacements. It is a thing to read, not a thing to keep attempting, and it is sticky: unlike `problem` it outlives the window it happened in |
+
+Leave it out for a dependency whose clients reconnect on their own. It is optional, and an
+empty `recyclePods` is the right answer far more often than not.
 
 ### Where it writes, and the permission it needs
 
@@ -266,6 +311,10 @@ assumes.
 `kubectl agentic-preview schedules` lists both kinds together; a DNS entry is `"kind": "dns"`
 with `hostname`, `redirectTo` and the ConfigMap it writes into as its `target`. See
 [Reading it back](#reading-it-back) above for the shape.
+
+One field is DNS-only and is worth looking at even when `problem` is empty: `recycleProblem`
+says that pods a window should have replaced were not, and so may still be connected to the
+address the name used to have.
 
 ### Measured
 

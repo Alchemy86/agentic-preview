@@ -149,8 +149,20 @@ subjects:
 #
 #   pods         list    read why a preview's pods are not running, so a POST
 #                        that fails says "ErrImagePull: manifest unknown" rather
-#                        than "not ready". Read-only, and it is the difference
-#                        between a diagnosable failure and a mystery.
+#                        than "not ready". It is the difference between a
+#                        diagnosable failure and a mystery.
+#                        Also used to find the pods a DNS schedule's
+#                        `recyclePods` names.
+#                delete  replace a pod that holds a connection open to the name
+#                        a DNS-redirect schedule has just repointed. Changing
+#                        what a name resolves to changes nothing for a client
+#                        that resolved it once and pooled the answer, so the
+#                        pod has to go for the window to actually take effect -
+#                        and again when it shuts, or it spends the working day
+#                        talking to the stand-in. USED ONLY by a schedule that
+#                        declares `recyclePods`, and only in the namespaces on
+#                        this Role, which is the same fence every other
+#                        workload operation here sits behind.
 #
 # NOT granted, deliberately: nothing on ConfigMaps or Secrets (the preview
 # REFERENCES the live ones, it does not read or copy their contents), nothing on
@@ -174,7 +186,7 @@ rules:
     verbs: ["get", "list", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list"]
+    verbs: ["list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

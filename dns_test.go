@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -623,3 +625,247 @@ func countUpdates(cs *fake.Clientset) int {
 type errUnimportant struct{}
 
 func (errUnimportant) Error() string { return "RBAC: no rule allows update on configmaps" }
+
+// --- recyclePods ------------------------------------------------------------
+//
+// The gap this closes was measured on dev, not imagined: Keycloak held five
+// pooled JDBC connections per replica to the stand-in's ClusterIP for four days
+// after the window shut. The ConfigMap was right the whole time and every check
+// in this file passed; the pods had simply resolved the name once, at startup,
+// and never asked again. Nothing above can see that, which is why none of the
+// tests above would have caught it.
+
+// podsFor seeds pods into the fake clientset and returns their names.
+func podsFor(t *testing.T, cs *fake.Clientset, ns string, labels map[string]string, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		_, err := cs.CoreV1().Pods(ns).Create(context.Background(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: n, Labels: labels},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("seeding pod %s: %v", n, err)
+		}
+	}
+}
+
+func livePods(t *testing.T, cs *fake.Clientset, ns string) []string {
+	t.Helper()
+	l, err := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("listing pods: %v", err)
+	}
+	var out []string
+	for _, p := range l.Items {
+		out = append(out, p.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func recycleOffHours(t *testing.T) *schedule {
+	t.Helper()
+	return dnsSchedule(t, `
+defaultLocation: Europe/London
+schedules:
+  - name: sql-offhours
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+    recyclePods:
+      - namespace: shop
+        selector: app=checkout-api
+    windows:
+      - days: [Mon, Tue, Wed, Thu]
+        start: "18:32"
+        end:   "07:21"
+`)
+}
+
+// TestDNSRecycleReplacesPinnedPodsOnBothEdges is the acceptance bar. The
+// property is about a sequence, like TestDNSWindowOpensClosesAndCoexists: the
+// pods go when the line goes in, they go again when it comes out, and they are
+// left alone on every tick in between - including the drift re-apply, which is
+// the tick that runs hundreds of times in one real window.
+func TestDNSRecycleReplacesPinnedPodsOnBothEdges(t *testing.T) {
+	sc := recycleOffHours(t)
+	s, cs := dnsServer(t, preexisting, sc)
+	ctx := context.Background()
+	mine := map[string]string{"app": "checkout-api"}
+
+	podsFor(t, cs, "shop", mine, "checkout-api-1", "checkout-api-2")
+	podsFor(t, cs, "shop", map[string]string{"app": "basket-api"}, "basket-api-1")
+
+	// A shut window touches nothing.
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 09:00"))
+	if got := livePods(t, cs, "shop"); len(got) != 3 {
+		t.Fatalf("a closed window recycled pods: %v", got)
+	}
+
+	// The open writes the line AND replaces the pods that cannot re-resolve.
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 18:32"))
+	if got := livePods(t, cs, "shop"); len(got) != 1 || got[0] != "basket-api-1" {
+		t.Fatalf("the open did not recycle exactly the selected pods, left: %v", got)
+	}
+	if st := s.scheduleStateFor(sc.spec.Name); st.RecycleProblem != "" {
+		t.Fatalf("recycleProblem after a clean open: %q", st.RecycleProblem)
+	}
+
+	// The replacements the owner makes must survive every tick of the window,
+	// drift included. Somebody else rewrites the key; the controller re-applies
+	// the line, and that is NOT a reason to restart anything.
+	podsFor(t, cs, "shop", mine, "checkout-api-3", "checkout-api-4")
+	if _, err := cs.CoreV1().ConfigMaps(testDNSNamespace).Update(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testDNSNamespace, Name: testDNSName},
+		Data:       map[string]string{testDNSKey: preexisting},
+	}, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("simulating drift: %v", err)
+	}
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 20:00"))
+	if st := s.scheduleStateFor(sc.spec.Name); st.ReRaises != 1 {
+		t.Fatalf("the drift check did not re-raise: ReRaises=%d", st.ReRaises)
+	}
+	if got := livePods(t, cs, "shop"); len(got) != 3 {
+		t.Fatalf("the drift re-apply recycled pods, leaving: %v - a 30s tick must not restart a workload", got)
+	}
+
+	// A plain in-window tick with nothing wrong is likewise inert.
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 21:00"))
+	if got := livePods(t, cs, "shop"); len(got) != 3 {
+		t.Fatalf("a healthy in-window tick recycled pods: %v", got)
+	}
+
+	// The close takes the line out and replaces the pods a second time: they
+	// have spent the window pooled against the stand-in and will not notice the
+	// name answering normally again.
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-15 07:21"))
+	if strings.Contains(data(t, cs), "agentic-preview:sql-offhours") {
+		t.Fatalf("the close left the line behind:\n%s", data(t, cs))
+	}
+	if got := livePods(t, cs, "shop"); len(got) != 1 || got[0] != "basket-api-1" {
+		t.Fatalf("the close did not recycle the selected pods, left: %v", got)
+	}
+}
+
+// TestDNSRecycleIsNotRunForAnAdoptedLine covers the restart case: a pod that
+// comes up mid-window adopts a line that is already there. The pods behind it
+// were recycled when it was written, and recycling them again would make every
+// restart of this service a restart of somebody's database client.
+func TestDNSRecycleIsNotRunForAnAdoptedLine(t *testing.T) {
+	sc := recycleOffHours(t)
+	already := "hosts {\n    " + hostsLine(sc) + "\n    " + otherLine + "\n    fallthrough\n}\n"
+	s, cs := dnsServer(t, already, sc)
+	podsFor(t, cs, "shop", map[string]string{"app": "checkout-api"}, "checkout-api-1")
+
+	s.reconcileDNSSchedule(context.Background(), sc, at(t, sc, "2026-09-14 20:00"))
+	if got := livePods(t, cs, "shop"); len(got) != 1 {
+		t.Fatalf("adopting an existing line recycled pods, leaving: %v", got)
+	}
+}
+
+// TestDNSRecycleFailureIsReadableAndNotRetried. A recycle is the follow-through
+// of an operation that has already succeeded, so a failure must not undo the
+// line, must not crash, and must not be attempted again - the pods that WERE
+// deleted have been replaced by now and a second pass would take out the
+// replacements. What is left is a sticky field saying which pods may still hold
+// the old address.
+func TestDNSRecycleFailureIsReadableAndNotRetried(t *testing.T) {
+	sc := recycleOffHours(t)
+	s, cs := dnsServer(t, preexisting, sc)
+	ctx := context.Background()
+	podsFor(t, cs, "shop", map[string]string{"app": "checkout-api"}, "checkout-api-1")
+
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Resource: "pods"}, "checkout-api-1", errForbidden)
+	})
+
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 18:32"))
+
+	// The window is open regardless: the redirect is the operation.
+	if !strings.Contains(data(t, cs), "agentic-preview:sql-offhours") {
+		t.Fatalf("a failed recycle undid the redirect:\n%s", data(t, cs))
+	}
+	st := s.scheduleStateFor(sc.spec.Name)
+	if !st.Up || st.Problem != "" {
+		t.Fatalf("a failed recycle marked the window down: up=%v problem=%q", st.Up, st.Problem)
+	}
+	if !strings.Contains(st.RecycleProblem, "checkout-api-1") ||
+		!strings.Contains(st.RecycleProblem, "may still hold connections") {
+		t.Fatalf("recycleProblem does not say which pods are still pinned: %q", st.RecycleProblem)
+	}
+
+	// The next tick is a healthy in-window check. It must not try again, and
+	// the reported problem must survive it.
+	s.reconcileDNSSchedule(ctx, sc, at(t, sc, "2026-09-14 18:33"))
+	if st := s.scheduleStateFor(sc.spec.Name); st.RecycleProblem == "" {
+		t.Fatal("the recycle problem was cleared by a tick that did not fix it")
+	}
+}
+
+var errForbidden = fmt.Errorf("forbidden: pods \"checkout-api-1\" is forbidden")
+
+// TestRecyclePodsIsRefusedAtBoot. Every one of these is fatal where somebody is
+// looking rather than at 18:32 where nobody is: a namespace outside the fence
+// this service is bounded by, a selector that would match everything, a
+// selector that is not one, and the field on the kind that has no redirect to
+// follow through on.
+func TestRecyclePodsIsRefusedAtBoot(t *testing.T) {
+	head := `
+defaultLocation: Europe/London
+schedules:
+  - name: sql-offhours
+    type: dns
+    hostname: dev-sql.example.internal
+    redirectTo: 10.42.0.9
+`
+	windows := `    windows:
+      - days: [Mon]
+        start: "18:32"
+        end:   "07:21"
+`
+	cases := map[string]struct{ body, want string }{
+		"a namespace outside ALLOWED_NAMESPACES": {
+			head + "    recyclePods:\n      - namespace: kube-system\n        selector: k8s-app=kube-dns\n" + windows,
+			"not in ALLOWED_NAMESPACES",
+		},
+		"an empty selector": {
+			head + "    recyclePods:\n      - namespace: shop\n        selector: \"\"\n" + windows,
+			"selector is required",
+		},
+		"a missing namespace": {
+			head + "    recyclePods:\n      - selector: app=checkout-api\n" + windows,
+			"namespace is required",
+		},
+		"a selector that is not one": {
+			head + "    recyclePods:\n      - namespace: shop\n        selector: \"app = = checkout\"\n" + windows,
+			"selector",
+		},
+		"the field on an intercept schedule": {
+			`
+defaultLocation: Europe/London
+schedules:
+  - name: keycloak-offhours
+    type: intercept
+    workload: checkout-api
+    namespace: shop
+    targetService: authstub.shop
+    recyclePods:
+      - namespace: shop
+        selector: app=checkout-api
+` + windows,
+			"recyclePods",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadSchedules(writeTemp(t, tc.body), cfgFor("shop", "previews"))
+			if err == nil {
+				t.Fatal("accepted, want a refusal at boot")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("refusal does not say why: %v", err)
+			}
+		})
+	}
+}

@@ -50,6 +50,19 @@ type scheduleState struct {
 	Raises   int `json:"raises"`
 	ReRaises int `json:"reRaises"`
 
+	// RecycleProblem is why a DNS schedule's recyclePods did not finish the
+	// last time the redirect went in or came out. It is separate from Problem
+	// and it is STICKY - Problem is about the window that is open now and is
+	// cleared when the window shuts, and this outlives that on purpose.
+	//
+	// A recycle is not retried. The pods that were deleted have been replaced
+	// by now, and a second pass would delete the replacements - which are the
+	// ones holding the correct address - so a failure here is a thing to READ,
+	// not a thing to keep attempting. It says which pods may still be talking
+	// to the address the name used to have, and it stays until the next
+	// transition recycles them successfully.
+	RecycleProblem string `json:"recycleProblem,omitempty"`
+
 	raisedAt  time.Time
 	lastAlarm time.Time
 	// applied is the DNS kind's "is it held", the counterpart of the registry
