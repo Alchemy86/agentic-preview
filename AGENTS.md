@@ -43,6 +43,17 @@ request. The measured numbers and failure modes are in
   otherwise leave an agent holding a watcher the losing pass cancels — reported up, traffic
   held. `agents_test.go` and `session_test.go` are the executable form; the measured failure
   is in [`docs/LIMITS.md`](docs/LIMITS.md).
+- **Expiry is not a smaller `DELETE`, and `expiry.go`'s header comment is the record of why.**
+  A `DELETE` drops the header route first; an expiry deletes the Deployment and Service FIRST,
+  confirms they are gone, and only then removes the intercept - dropping a route to a preview
+  that is still running hangs the header rather than falling back to the live workload. An
+  unconfirmed teardown keeps the route and moves the deadline out by `PREVIEW_REAP_RECHECK`.
+  The same file carries the orphan sweep, which exists because the registry is in memory and
+  the objects are not: a preview raised before this process started, or one whose create built
+  the workload and then failed to raise the intercept, has no deadline anywhere. It works only
+  from the labels and creation time every object already carries, so nothing about it is
+  durable state. `expiry_test.go` is the executable form of both; the measured failure is in
+  [`docs/LIMITS.md`](docs/LIMITS.md).
 - **`kube.go`'s `kubeAPI` interface is the inventory the RBAC is written from.** It is the
   whole Kubernetes surface this service uses. Adding a method to it means adding a verb to
   `deploy/rbac.yaml`, with the reason spelled out there — do both or neither.

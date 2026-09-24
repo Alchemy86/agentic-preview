@@ -332,10 +332,16 @@ cluster.
   every Service selector in the namespace and *refuses* rather than risk a preview pod
   joining the live EndpointSlice. A workload whose Service selects on something unexpected
   gets a refusal, not a preview.
-- **A restart puts previews out of the timer's reach.** The registry is in memory. Strays are
-  always findable by label — `kubectl get deploy,svc -A -l
-  app.kubernetes.io/managed-by=agentic-preview` — and a `DELETE` finds them the same way, but
-  cleanup after a restart is somebody asking, not a timer.
+- **A restart does not put previews out of the timer's reach.** The registry is in memory, but
+  the objects are their own record: everything created carries
+  `app.kubernetes.io/managed-by=agentic-preview`, the work id and a creation time, so the reap
+  sweep also removes preview objects it has no entry for once they are older than
+  `PREVIEW_LIFETIME`. It cannot reach an intercept a previous incarnation raised — that one is
+  departed at startup instead.
+- **An expiry deletes the objects before it touches routing**, and leaves the header route
+  alone unless it can confirm they are gone, rechecking in 12h if it cannot. Dropping the route
+  from a preview that is still running hangs the header rather than falling back to the live
+  workload.
 - **The 24h `PREVIEW_LIFETIME` timer may not be what you want.** If something else cleans
   previews up, turn it off: a timer that removes a preview while somebody is still testing
   against it is worse than a forgotten pod.

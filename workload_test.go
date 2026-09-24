@@ -106,8 +106,18 @@ func (f *fakeKube) listDeployments(_ context.Context, ns, selector string) ([]ap
 	return out, nil
 }
 
+// A delete here actually REMOVES the object as well as recording it, because
+// expiry now asks the cluster whether what it deleted has gone before it lets
+// the header route go (see expiry.go). A fake that only recorded deletes would
+// report every teardown as incomplete and prove the opposite of what it meant.
 func (f *fakeKube) deleteDeployment(_ context.Context, ns, name string) error {
 	f.deletedDeployments = append(f.deletedDeployments, name+"."+ns)
+	for i := range f.deployments {
+		if f.deployments[i].Namespace == ns && f.deployments[i].Name == name {
+			f.deployments = append(f.deployments[:i], f.deployments[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -143,6 +153,12 @@ func (f *fakeKube) listServices(_ context.Context, ns, selector string) ([]corev
 
 func (f *fakeKube) deleteService(_ context.Context, ns, name string) error {
 	f.deletedServices = append(f.deletedServices, name+"."+ns)
+	for i := range f.services {
+		if f.services[i].Namespace == ns && f.services[i].Name == name {
+			f.services = append(f.services[:i], f.services[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 

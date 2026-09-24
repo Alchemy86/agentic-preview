@@ -150,9 +150,8 @@ create a pod it cannot prove is isolated.
 
 ## There is a timer against forgotten previews, and you may well want it off
 
-`PREVIEW_LIFETIME` sweeps a work id that nothing has touched for 24 hours — intercepts and
-created objects together, by the same path a `DELETE` takes. Any contact with an id —
-raising a service under it again, adding another — puts the whole id back to a full
+`PREVIEW_LIFETIME` sweeps a work id that nothing has touched for 24 hours. Any contact with
+an id — raising a service under it again, adding another — puts the whole id back to a full
 lifetime, because a work id is one change and its services are used together.
 `GET /previews` reports each preview's age and, when a lifetime is set, exactly when it
 expires, so an expiry is visible *before* it happens and can be extended rather than
@@ -165,21 +164,54 @@ testing against it is worse than a forgotten pod. Off is an explicit choice on p
 leave the configuration alone and you get the timer. With expiry off, the age in
 `GET /previews` is what a person or a supervising process reviews instead.
 
-## A restart puts previews out of the timer's reach, and the labels are the answer to that
+An expiry is **not** the same path a `DELETE` takes, and the difference is the order. A
+`DELETE` is somebody saying they are finished, so it drops the header route first and then
+the objects. A timer is a guess, and getting the order wrong turns a wrong guess into a
+black hole: an intercept removed while the preview pod is still running leaves the header
+answered by nothing rather than falling back to the live workload — the traffic-agent holds
+it on an unbounded retry (measured; see
+[Design](DESIGN.md)). So an expiry deletes the Deployment and Service **first**, confirms
+they have actually gone, and only then removes the intercept. If it cannot confirm — the
+objects did not go, or the namespace could not be listed to find out — the header route is
+left exactly where it is and the deadline moves out by `PREVIEW_REAP_RECHECK` (12h), so
+traffic keeps reaching the thing that is still running and the sweep tries again later. The
+confirmation is scoped to the namespaces that work id was actually raised in, so a namespace
+whose RBAC lags `ALLOWED_NAMESPACES` cannot stall every expiry on the cluster.
+
+## A restart used to put previews out of the timer's reach
 
 The record of what is live is in memory, so a restarted process no longer knows about the
-previews its predecessor raised — and will not expire them. It has not lost them, though:
-everything it creates carries `app.kubernetes.io/managed-by=agentic-preview` and the work
-id, so a stray is always findable and always removable —
+previews its predecessor raised. That did not lose them — it made them **immortal**: nothing
+ever asked their age again while their Deployment and Service carried on running. Measured on
+a live cluster under a 48h lifetime: 17 of 25 preview Deployments were unknown to the
+registry, the oldest 310 hours old. A create that built the workload and then failed to raise
+the intercept leaves the same thing behind without any restart at all, because it unregisters
+itself and the objects it already made stay.
+
+The answer is that the objects are their own record. Everything this tool creates carries
+`app.kubernetes.io/managed-by=agentic-preview`, the work id and the workload, plus a
+`creationTimestamp` —
 
 ```bash
 kubectl get deploy,svc -A -l app.kubernetes.io/managed-by=agentic-preview
-curl -XDELETE .../previews/1234    # goes by label, not by memory
 ```
 
-— and re-POSTing the same work id adopts the existing objects and rolls them forward rather
-than colliding with them. It is a real gap all the same: after a restart, cleanup is
-somebody asking, not a timer. Previews are also **not** removed on `SIGTERM`, deliberately —
+— so the reap sweep also looks for preview objects the registry has no entry for and removes
+any that are older than `PREVIEW_LIFETIME`, by the same confirmed-first teardown as above.
+Nothing durable is needed for it to survive a restart: the cluster is the state. Two rules
+keep it off live previews — an object whose work id and workload are in the registry is never
+an orphan whatever its age, and an object has to be reported unknown on two consecutive
+sweeps before anything is deleted, because the registry is empty for a moment at startup.
+
+What it cannot do is remove the *intercept* such a preview left in manager state:
+`WatchIntercepts` is filtered to the calling session's own work and `ArriveAsClient` always
+mints a new session, so a previous incarnation's intercept is unreachable by name from this
+one. In practice it is already gone — `SweepPreviousSession` departs the recorded session at
+startup, which releases everything it held — and where that record was lost, the manager's
+own TTL is what ends it.
+
+Re-POSTing the same work id still adopts the existing objects and rolls them forward rather
+than colliding with them. Previews are also **not** removed on `SIGTERM`, deliberately —
 destroying every preview in the cluster on each rollout of this service would be its own
 outage.
 

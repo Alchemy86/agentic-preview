@@ -98,6 +98,18 @@ type Server struct {
 	// separate from sched because the two have different writers: the loop owns
 	// sched and rewrites it every tick, and the API owns this.
 	over *overrides
+
+	// The orphan sweep's only memory, written and read by ReapExpired's
+	// goroutine alone and by nothing else. None of it is durable on purpose:
+	// the evidence an orphan sweep works from is on the objects themselves,
+	// and a restart that lost this would rebuild it in two reap intervals.
+	// orphanSeen is last sweep's unknown set, so that nothing is deleted on a
+	// single sighting; orphanNextTry holds off a teardown that could not be
+	// confirmed; orphanQuiet throttles the "this namespace cannot be listed"
+	// report, keyed "<namespace>/<kind>".
+	orphanSeen    map[orphanKey]bool
+	orphanNextTry map[orphanKey]time.Time
+	orphanQuiet   map[string]time.Time
 }
 
 func NewServer(cfg *config) *Server {
@@ -108,6 +120,10 @@ func NewServer(cfg *config) *Server {
 		over:     newOverrides(),
 		sessions: map[string]*mgrSession{},
 		saved:    map[string]string{},
+
+		orphanSeen:    map[orphanKey]bool{},
+		orphanNextTry: map[orphanKey]time.Time{},
+		orphanQuiet:   map[string]time.Time{},
 	}
 	s.agents = newAgentPool(s)
 	if k, err := newKubeAPI(); err != nil {

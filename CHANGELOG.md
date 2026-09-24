@@ -96,6 +96,30 @@ controller returns on its first line and no other code path is reached.
 
 ### Fixed
 
+- **A preview that outlived `PREVIEW_LIFETIME` was not always removed, and after a restart
+  never was.** The expiry sweep asks the in-memory registry which work ids are past their
+  deadline, so a preview raised before this process started had no deadline anywhere — the
+  restart did not lose it, it made it immortal. A create that built the workload and then
+  failed to raise the intercept left the same thing behind with no restart at all, because
+  it unregisters itself and the Deployment and Service it already made stay up. Measured on
+  a live cluster under a 48h lifetime: 17 of 25 preview Deployments were unknown to the
+  registry, the oldest 310 hours old. The sweep now also looks for preview objects it has no
+  entry for, using the labels and creation time every object it makes already carries, and
+  removes those older than `PREVIEW_LIFETIME` — so it needs nothing durable to survive a
+  restart. A tracked preview is never an orphan whatever its age, and nothing is deleted on a
+  single sighting.
+- **An expiry now deletes the preview's objects before it touches routing, and confirms.**
+  A `DELETE` may drop the header route first — somebody has said they are finished. A timer
+  is a guess, and removing an intercept from a preview whose pod is still running does not
+  fall back to the live workload: the traffic-agent holds the header on an unbounded retry
+  and it answers nothing. Expiry therefore deletes the Deployment and Service, confirms they
+  have gone, and only then removes the intercept; if it cannot confirm, the route is left
+  alone and the deadline moves out by `PREVIEW_REAP_RECHECK` (12h, new). The confirmation is
+  scoped to the namespaces that work id was actually raised in, so a namespace whose RBAC
+  lags `ALLOWED_NAMESPACES` cannot stall every expiry on the cluster, and it backs off rather
+  than polling on a fixed interval — a fixed poll spent enough list calls to trip the
+  Kubernetes client's own rate limiter and report that as "could not confirm".
+
 - **Every namespace in `ALLOWED_NAMESPACES` is now served, not just the first.** The process
   arrived at the manager once, in `allowedNamespaces[0]`, and used that one session for
   everything — but a client session is bound to the namespace it arrives in, and the manager

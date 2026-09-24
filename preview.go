@@ -660,6 +660,25 @@ func (r *registry) touch(workID string, until time.Time) {
 	}
 }
 
+// namespacesOf returns the distinct namespaces a work id's previews are in.
+// It is what scopes an expiry's confirmation check: whether a work id's objects
+// are gone is answered in the namespaces it was actually raised in, and a
+// namespace it was never in cannot say anything about it either way.
+func (r *registry) namespacesOf(workID string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for k := range r.byKey {
+		if k.WorkID == workID && !seen[k.Namespace] {
+			seen[k.Namespace] = true
+			out = append(out, k.Namespace)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // expired returns the work ids whose previews are past their expiry.
 func (r *registry) expired(now time.Time) []string {
 	r.mu.RLock()

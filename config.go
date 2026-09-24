@@ -71,6 +71,27 @@ type config struct {
 	// reapInterval is how often expired previews are swept.
 	reapInterval time.Duration
 
+	// reapConfirm is how long an expiry waits for the objects it just deleted
+	// to actually disappear before calling the teardown unconfirmed. A delete
+	// is accepted asynchronously, so a list taken straight afterwards can still
+	// return what it removed; without a short wait a perfectly healthy teardown
+	// would sit on a reapRecheck for the sake of two seconds.
+	reapConfirm time.Duration
+
+	// reapRecheck is how far an expiry deadline moves out when the teardown
+	// could not be CONFIRMED - the objects did not go, or a namespace could
+	// not be listed to find out. It is not a retry interval for its own sake:
+	// it is how long a preview whose pod refused to die keeps its header
+	// route, which is the whole reason expiry deletes the objects before it
+	// touches routing. Dropping the route from something still running does
+	// not restore the live workload, it hangs the header (see expiry.go).
+	//
+	// 12h rather than minutes because the failures it covers are ones a person
+	// has to fix - a finalizer wedged on a namespace, an RBAC Role that no
+	// longer grants delete - and retrying those every minute produces noise
+	// and no teardowns.
+	reapRecheck time.Duration
+
 	// readyTimeout is how long a create waits for the preview's pods to come
 	// up before giving up and reporting why. Zero means do not wait, which
 	// trades the two loudest failure modes - a tag that does not exist, and no
@@ -131,6 +152,8 @@ func loadConfig() (*config, error) {
 		readyTimeout:     envDuration("PREVIEW_READY_TIMEOUT", 120*time.Second),
 		lifetime:         envLifetime("PREVIEW_LIFETIME", 24*time.Hour),
 		reapInterval:     envDuration("PREVIEW_REAP_INTERVAL", time.Minute),
+		reapRecheck:      envDuration("PREVIEW_REAP_RECHECK", 12*time.Hour),
+		reapConfirm:      envDuration("PREVIEW_REAP_CONFIRM", 60*time.Second),
 
 		schedulePath:          strings.TrimSpace(os.Getenv("SCHEDULE_FILE")),
 		scheduleCheckInterval: envDuration("SCHEDULE_CHECK_INTERVAL", 30*time.Second),

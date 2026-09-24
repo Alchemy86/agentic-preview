@@ -91,6 +91,17 @@ spec:
             # is worse than a forgotten pod. Switching it off is deliberately
             # an explicit choice: leave this alone and you get the timer.
             #
+            # It bounds two sweeps. Previews this service remembers expire
+            # that long after they were last touched; preview objects it has
+            # NO record of - raised before this pod started, or left behind by
+            # a create that built the workload and then failed to raise the
+            # intercept - are removed that long after they were created, found
+            # by the labels every object it makes carries. Off switches off
+            # both. Either way an expiry deletes the Deployment and Service
+            # first, confirms they have gone and only then drops the header
+            # route; if it cannot confirm, the route stays and it rechecks in
+            # PREVIEW_REAP_RECHECK (12h).
+            #
             # Either way GET /previews reports every preview's age, so
             # accumulating previews are visible with expiry off too.
             - name: PREVIEW_LIFETIME

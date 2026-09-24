@@ -71,6 +71,14 @@ preview:
   # previews up, because a timer that removes a preview while somebody is still
   # testing against it is worse than a forgotten pod. Leaving it alone gives
   # you the timer, which is the safe answer when nobody is minding the cluster.
+  #
+  # It bounds two sweeps. Previews the service remembers expire this long
+  # after they were last touched; preview objects it has NO record of - raised
+  # before its pod started, or left by a create that built the workload and
+  # then failed to raise the intercept - are removed this long after they were
+  # created, found by the labels every object it makes carries. "off" switches
+  # off both. Either way an expiry deletes the Deployment and Service first,
+  # confirms they have gone and only then drops the header route.
   lifetime: 24h
 
   # How long a create waits for the preview's pods to come up before giving up

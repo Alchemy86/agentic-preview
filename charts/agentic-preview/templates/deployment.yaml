@@ -80,6 +80,8 @@ spec:
             # from the one list.
             - name: ALLOWED_NAMESPACES
               value: {{ include "agentic-preview.allowedNamespaces" . | fromYamlArray | join "," | quote }}
+            # Bounds two sweeps: previews the service remembers, and preview
+            # objects it has no record of - see the note in values.yaml.
             - name: PREVIEW_LIFETIME
               value: {{ include "agentic-preview.previewLifetime" . | quote }}
             - name: PREVIEW_READY_TIMEOUT

@@ -139,6 +139,14 @@ deadline *before* it arrives. If something else is responsible for cleaning prev
 set `preview.lifetime: "off"` — a timer that removes a preview while somebody is still
 testing against it is worse than a forgotten pod.
 
+It bounds two sweeps. Previews the service remembers expire that long after they were last
+touched; preview objects it has **no** record of — raised before its pod started, or left by
+a create that built the workload and then failed to raise the intercept — are removed that
+long after they were created, found by the labels every object it makes carries. Off switches
+off both. Either way an expiry deletes the Deployment and Service first, confirms they have
+gone, and only then drops the header route; if it cannot confirm, the route stays and it
+rechecks in 12h.
+
 ## Upgrading and uninstalling
 
 ```bash

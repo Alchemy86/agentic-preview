@@ -17,7 +17,9 @@ set. With Helm, the values that map onto these are in
 | `RECONNECT_BACKOFF` | `5s` | Pause before rebuilding a dead session. |
 | `AGENT_RECONCILE_INTERVAL` | `10s` | How often the agent-pod set is re-reconciled without a new snapshot. |
 | `PREVIEW_LIFETIME` | `24h` | How long a preview lives untouched before it is swept. Any contact with a work id extends every preview in it. `off`, `never` or `0` disables expiry — do that when something else is responsible for cleaning up. |
-| `PREVIEW_REAP_INTERVAL` | `1m` | How often expired previews are swept. |
+| `PREVIEW_REAP_INTERVAL` | `1m` | How often expired previews are swept, and how often preview objects this process has no record of are looked for. |
+| `PREVIEW_REAP_CONFIRM` | `60s` | How long an expiry waits for the objects it deleted to actually disappear before calling the teardown unconfirmed. |
+| `PREVIEW_REAP_RECHECK` | `12h` | How far an expiry deadline moves out when the teardown could **not** be confirmed. Expiry deletes the preview's objects before it touches routing and leaves the header route alone unless they are confirmed gone, so this is how long a preview whose pod refused to die keeps its route. |
 | `PREVIEW_READY_TIMEOUT` | `120s` | How long a create waits for the preview's pods before failing the `POST` with the reason. `0` skips the wait. |
 | `SCHEDULE_FILE` | unset | A file declaring [scheduled, headerless intercepts](SCHEDULES.md). Unset — the normal case — means there are none and nothing about that mode is reached. Read once at startup; anything wrong in it is fatal there rather than at 18:32. |
 | `SCHEDULE_CHECK_INTERVAL` | `30s` | How often a schedule is reconciled: both how promptly a window opens or closes, and how quickly a scheduled intercept that has died is noticed and re-raised. |
@@ -35,6 +37,10 @@ Two of these carry more weight than the rest, and each has its own note:
 - **`PREVIEW_LIFETIME`** is a safety net, not a policy. If something else is responsible
   for cleaning previews up, turn it off. See
   [Limits](LIMITS.md#there-is-a-timer-against-forgotten-previews-and-you-may-well-want-it-off).
+  It bounds two sweeps, not one: previews this process remembers expire that long after they
+  are last touched, and preview objects it has **no** record of — raised before it started, or
+  left by a create that built the workload and then failed to raise the intercept — are removed
+  that long after they were created. Switching it off switches off both.
 
 `HEADER_NAME` is deliberately service-level and not a request field: two services of one
 work id behind different header names would destroy the one guarantee a work id exists for.
